@@ -70,10 +70,12 @@ export function StudioWorkspace({
   const [splitPos, setSplitPos] = useState(50);
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
   const [interactionMode, setInteractionMode] = useState<'split' | 'brush' | 'pan'>('split');
+  const [prevToolBeforePan, setPrevToolBeforePan] = useState<'split' | 'brush'>('split');
   const [isPainting, setIsPainting] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panStartRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
+  // Screen-space cursor coordinates relative to mainRef (accurate at any 25%-800% zoom!)
   const [cursorPos, setCursorPos] = useState<{ x: number; y: number } | null>(null);
   const [zoom, setZoom] = useState(100);
   const [holdOriginal, setHoldOriginal] = useState(false);
@@ -620,8 +622,34 @@ export function StudioWorkspace({
         {/* Center 60fps Interactive Canvas (Supports 25%-800% Photoshop Zoom & Pan) */}
         <main
           ref={mainRef}
+          onPointerMove={(e) => {
+            if (interactionMode === 'brush') {
+              const mainRect = mainRef.current?.getBoundingClientRect();
+              if (mainRect) {
+                setCursorPos({ x: e.clientX - mainRect.left, y: e.clientY - mainRect.top });
+              }
+            }
+          }}
+          onPointerLeave={() => setCursorPos(null)}
           className="flex-1 relative flex items-center justify-center p-3 sm:p-6 overflow-hidden"
         >
+          {/* Screen-space Brush Cursor Preview (never distorted by CSS zoom scale!) */}
+          {interactionMode === 'brush' && cursorPos && (
+            <div
+              className={`absolute rounded-full border-2 pointer-events-none z-40 -translate-x-1/2 -translate-y-1/2 shadow-[0_0_0_1px_rgba(255,255,255,0.6)] ${
+                refineSettings.tool === 'keep'
+                  ? 'border-blue-500 bg-blue-500/15'
+                  : 'border-red-500 bg-red-500/15'
+              }`}
+              style={{
+                left: cursorPos.x,
+                top: cursorPos.y,
+                width: refineSettings.brushSize,
+                height: refineSettings.brushSize,
+              }}
+            />
+          )}
+
           <div
             ref={stageRef}
             onPointerDown={(e) => {
@@ -652,12 +680,8 @@ export function StudioWorkspace({
                 });
                 return;
               }
-              if (interactionMode === 'brush') {
-                const rect = stageRef.current?.getBoundingClientRect();
-                if (rect) {
-                  setCursorPos({ x: e.clientX - rect.left, y: e.clientY - rect.top });
-                }
-                if (isPainting) paintBrushAt(e.clientX, e.clientY);
+              if (interactionMode === 'brush' && isPainting) {
+                paintBrushAt(e.clientX, e.clientY);
               }
             }}
             onPointerUp={() => {
@@ -671,8 +695,7 @@ export function StudioWorkspace({
                 commitBrushStroke();
               }
             }}
-            onPointerLeave={() => {
-              setCursorPos(null);
+            onPointerCancel={() => {
               if (isPanning) {
                 setIsPanning(false);
                 panStartRef.current = null;
@@ -685,6 +708,7 @@ export function StudioWorkspace({
             }}
             style={{
               transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom / 100})`,
+              imageRendering: zoom >= 300 ? 'pixelated' : 'auto',
             }}
             className={`relative w-full max-w-3xl aspect-[4/3] rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800 shadow-sm bg-checkerboard touch-none ${
               interactionMode === 'brush'
@@ -706,23 +730,6 @@ export function StudioWorkspace({
               ref={cutoutCanvasRef}
               className="absolute inset-0 w-full h-full object-contain pointer-events-none"
             />
-
-            {/* Brush Cursor Preview */}
-            {interactionMode === 'brush' && cursorPos && (
-              <div
-                className={`absolute rounded-full border-2 pointer-events-none z-30 -translate-x-1/2 -translate-y-1/2 ${
-                  refineSettings.tool === 'keep'
-                    ? 'border-blue-500 bg-blue-500/15'
-                    : 'border-red-500 bg-red-500/15'
-                }`}
-                style={{
-                  left: cursorPos.x,
-                  top: cursorPos.y,
-                  width: refineSettings.brushSize,
-                  height: refineSettings.brushSize,
-                }}
-              />
-            )}
 
             {/* Original Layer (Clipped to Left of Split Slider, or 100% when holding Space) */}
             <div
@@ -826,10 +833,15 @@ export function StudioWorkspace({
             <span className="h-3.5 w-px bg-zinc-200 dark:bg-zinc-700 mx-0.5" />
             <button
               type="button"
-              onClick={() =>
-                setInteractionMode((m) => (m === 'pan' ? 'split' : 'pan'))
-              }
-              title="Hand / Pan Tool (Drag zoomed photo)"
+              onClick={() => {
+                if (interactionMode === 'pan') {
+                  setInteractionMode(prevToolBeforePan);
+                } else {
+                  setPrevToolBeforePan(interactionMode === 'brush' ? 'brush' : 'split');
+                  setInteractionMode('pan');
+                }
+              }}
+              title="Hand / Pan Tool (returns to Brush/Split when toggled off)"
               className={`inline-flex items-center gap-1 text-xs font-medium px-1.5 py-0.5 rounded ${
                 interactionMode === 'pan'
                   ? 'bg-blue-600 text-white'
