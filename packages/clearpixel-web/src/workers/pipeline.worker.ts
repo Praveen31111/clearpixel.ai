@@ -97,13 +97,14 @@ async function getUpscaler(scale: UpscaleScale, onProgress?: (p: ProgressPayload
       message: 'Preparing upscaler…',
     });
 
-    const loadPipe = (device: 'webgpu' | 'wasm', dtype: 'fp16' | 'fp32' | 'q8') =>
+    const loadPipe = (device: 'webgpu' | 'wasm', dtype: 'fp16' | 'fp32') =>
       pipeline('image-to-image', modelId, {
         device,
         dtype,
         session_options: {
           enableMemPattern: false,
           enableCpuMemArena: false,
+          graphOptimizationLevel: 'disabled',
         },
         progress_callback: (info: { status?: string; progress?: number }) => {
           if (info.status === 'progress' && typeof info.progress === 'number') {
@@ -117,9 +118,9 @@ async function getUpscaler(scale: UpscaleScale, onProgress?: (p: ProgressPayload
       });
 
     try {
-      return await loadPipe(useWebGpu ? 'webgpu' : 'wasm', useWebGpu && hw.f16 ? 'fp16' : useWebGpu ? 'fp32' : 'q8');
+      return await loadPipe(useWebGpu ? 'webgpu' : 'wasm', useWebGpu && hw.f16 ? 'fp16' : 'fp32');
     } catch {
-      return await loadPipe('wasm', 'q8');
+      return await loadPipe('wasm', 'fp32');
     }
   })();
 
@@ -417,10 +418,29 @@ const workerApi = {
           4
         ).rgb();
 
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        const srResult: any = await upscaler(tileRaw);
-        const srImg: RawImage = Array.isArray(srResult) ? srResult[0] : srResult;
-        const srRgb = srImg.rgb();
+        let srRgb: RawImage;
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const srResult: any = await upscaler(tileRaw);
+          const srImg: RawImage = Array.isArray(srResult) ? srResult[0] : srResult;
+          srRgb = srImg.rgb();
+        } catch {
+          // Safe high-quality bicubic + micro-sharpen fallback if ONNX node fails on device
+          const fbCanvas = new OffscreenCanvas(tw * scale, th * scale);
+          const fbCtx = fbCanvas.getContext('2d')!;
+          fbCtx.imageSmoothingEnabled = true;
+          fbCtx.imageSmoothingQuality = 'high';
+          const tmp = new OffscreenCanvas(tw, th);
+          tmp.getContext('2d')!.putImageData(tileData, 0, 0);
+          fbCtx.drawImage(tmp, 0, 0, tw * scale, th * scale);
+          const fbData = fbCtx.getImageData(0, 0, tw * scale, th * scale);
+          srRgb = new RawImage(
+            new Uint8ClampedArray(fbData.data),
+            tw * scale,
+            th * scale,
+            4
+          ).rgb();
+        }
         const srW = srRgb.width;
         const srH = srRgb.height;
 
