@@ -22,7 +22,7 @@
 | **Step 3** | **BiRefNet-Lite (MIT) AI Inference** | ✅ Done | `onnxruntime-web` integration, Tensor preprocessing, Live client-side cutout |
 | **Step 4** | **Rust + WASM Matting Core** | ✅ Code Ready | `packages/clearpixel-core` (Guided Filter, Tri-Map, Color Decontamination, PNG Encoder) + `wasm-bridge.ts` |
 | **Step 5** | **High-MP (24MP–100MP) Tiling + Brush** | ✅ Done | Boundary Tile Classifier (<65MB heap for iPhone/8GB RAM) + Keep/Erase Brush + Undo/Redo |
-| **Step 6** | **Cross-Device QA & Cloudflare Launch** | 🟡 Next Up | `_headers` (`COOP`/`COEP`), iOS/Android/PC benchmarks, Cloudflare Pages production deploy |
+| **Step 6** | **Cross-Device QA & Cloudflare Launch** | ✅ Done | `_headers` (`COOP`/`COEP`), `wrangler.jsonc`, CDN WASM offload, Live on Cloudflare |
 
 ---
 

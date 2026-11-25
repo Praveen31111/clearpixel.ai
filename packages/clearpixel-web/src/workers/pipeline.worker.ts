@@ -255,6 +255,37 @@ async function runInferenceWithFallback(
   }
 }
 
+function extractMaskBytes(
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  outputs: any
+): { maskBytes: Uint8Array; maskW: number; maskH: number } {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const rawTensor: any =
+    outputs.output ?? outputs.output_image ?? outputs.logits ?? Object.values(outputs)[0];
+  const slice = rawTensor[0];
+  const rawData = slice.data as Float32Array;
+
+  let minVal = Infinity;
+  let maxVal = -Infinity;
+  for (let i = 0; i < rawData.length; i++) {
+    const v = rawData[i];
+    if (v < minVal) minVal = v;
+    if (v > maxVal) maxVal = v;
+  }
+
+  const needsSigmoid = minVal < -0.01 || maxVal > 1.01;
+  const maskH = slice.dims[slice.dims.length - 2];
+  const maskW = slice.dims[slice.dims.length - 1];
+  const maskBytes = new Uint8Array(maskW * maskH);
+
+  for (let i = 0; i < maskBytes.length; i++) {
+    const prob = needsSigmoid ? 1 / (1 + Math.exp(-rawData[i])) : rawData[i];
+    maskBytes[i] = Math.max(0, Math.min(255, Math.round(prob * 255)));
+  }
+
+  return { maskBytes, maskW, maskH };
+}
+
 const workerApi = {
   async preload(
     quality: QualityMode = 'fast',
@@ -278,38 +309,83 @@ const workerApi = {
 
     onProgress?.({
       stage: 'compositing',
-      progress: 90,
+      progress: 82,
       message: 'Refining edges…',
     });
 
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const rawTensor: any =
-      outputs.output ?? outputs.output_image ?? outputs.logits ?? Object.values(outputs)[0];
-    const slice = rawTensor[0];
-    const rawData = slice.data as Float32Array;
-
-    let minVal = Infinity;
-    let maxVal = -Infinity;
-    for (let i = 0; i < rawData.length; i++) {
-      const v = rawData[i];
-      if (v < minVal) minVal = v;
-      if (v > maxVal) maxVal = v;
-    }
-
-    const needsSigmoid = minVal < -0.01 || maxVal > 1.01;
-    const maskH = slice.dims[slice.dims.length - 2];
-    const maskW = slice.dims[slice.dims.length - 1];
-    const maskBytes = new Uint8Array(maskW * maskH);
-
-    for (let i = 0; i < maskBytes.length; i++) {
-      const prob = needsSigmoid ? 1 / (1 + Math.exp(-rawData[i])) : rawData[i];
-      maskBytes[i] = Math.max(0, Math.min(255, Math.round(prob * 255)));
-    }
-
-    const maskImage = await new RawImage(maskBytes, maskW, maskH, 1).resize(
+    const full = extractMaskBytes(outputs);
+    const maskImage = await new RawImage(full.maskBytes, full.maskW, full.maskH, 1).resize(
       image.width,
       image.height
     );
+    const finalMask = maskImage.data as unknown as Uint8Array;
+
+    // Aspect-Aware Overlapping Multi-Crop Inference for wide/tall multi-subject scenes (e.g. 16:9 group shots):
+    // Prevents side/background people from being squished into 1024x1024 or dropped by center saliency bias.
+    const aspect = image.width / image.height;
+    if (aspect > 1.35 || aspect < 0.74) {
+      const isWide = aspect > 1.35;
+      const tileSize = isWide ? image.height : image.width;
+      const span = isWide ? image.width : image.height;
+      const midOffset = Math.max(0, Math.round((span - tileSize) * 0.5));
+      const endOffset = Math.max(0, span - tileSize);
+      const offsets = Array.from(new Set([0, midOffset, endOffset]));
+
+      const srcRgba = image.rgba().data as unknown as Uint8ClampedArray;
+
+      for (const offset of offsets) {
+        const x0 = isWide ? offset : 0;
+        const y0 = isWide ? 0 : offset;
+        const tw = isWide ? tileSize : image.width;
+        const th = isWide ? image.height : tileSize;
+
+        const tileData = new Uint8ClampedArray(tw * th * 4);
+        for (let ty = 0; ty < th; ty++) {
+          const srcStart = ((y0 + ty) * image.width + x0) * 4;
+          const dstStart = ty * tw * 4;
+          tileData.set(srcRgba.subarray(srcStart, srcStart + tw * 4), dstStart);
+        }
+
+        const tileImg = new RawImage(new Uint8Array(tileData.buffer), tw, th, 4).rgb();
+        const { outputs: tileOut } = await runInferenceWithFallback(tileImg, quality);
+        const tileExtracted = extractMaskBytes(tileOut);
+        const tileResized = await new RawImage(
+          tileExtracted.maskBytes,
+          tileExtracted.maskW,
+          tileExtracted.maskH,
+          1
+        ).resize(tw, th);
+        const tileMask = tileResized.data as unknown as Uint8Array;
+
+        // Smoothly merge confident subject detections from the un-squished crop into finalMask
+        for (let ty = 0; ty < th; ty++) {
+          const dstRow = (y0 + ty) * image.width + x0;
+          const srcRow = ty * tw;
+          // Feather tile borders by 24px to avoid any hard seam
+          const wy = Math.min(1, ty / 24, (th - 1 - ty) / 24);
+          for (let tx = 0; tx < tw; tx++) {
+            const wx = Math.min(1, tx / 24, (tw - 1 - tx) / 24);
+            const w = Math.min(wx, wy);
+            const tVal = tileMask[srcRow + tx];
+            const fIdx = dstRow + tx;
+            const fVal = finalMask[fIdx];
+
+            if (tVal > fVal && tVal >= 135) {
+              finalMask[fIdx] = Math.round(fVal * (1 - w) + tVal * w);
+            } else if (tVal < 25 && fVal < 110) {
+              // Suppress faint background mist in wide shots when local crop is confident it's background
+              finalMask[fIdx] = Math.round(fVal * (1 - 0.5 * w) + tVal * (0.5 * w));
+            }
+          }
+        }
+      }
+    }
+
+    onProgress?.({
+      stage: 'compositing',
+      progress: 92,
+      message: 'Refining edges…',
+    });
 
     const canvas = new OffscreenCanvas(image.width, image.height);
     const ctx = canvas.getContext('2d');
@@ -318,7 +394,7 @@ const workerApi = {
     const rgbaImage = image.rgba();
     const matting = await runStudioMatting(
       rgbaImage.data as unknown as Uint8ClampedArray,
-      maskImage.data as unknown as Uint8Array,
+      finalMask,
       image.width,
       image.height,
       subject

@@ -27,6 +27,48 @@ fn estimate_bg(rgba: &[u8], alpha: &[f32]) -> (f32, f32, f32) {
     }
 }
 
+fn estimate_local_bg(
+    rgba: &[u8],
+    alpha: &[f32],
+    width: usize,
+    height: usize,
+    cx: usize,
+    cy: usize,
+    global_bg: (f32, f32, f32),
+) -> (f32, f32, f32) {
+    let radius: isize = 24;
+    let x0 = (cx as isize - radius).max(0) as usize;
+    let y0 = (cy as isize - radius).max(0) as usize;
+    let x1 = (cx + radius as usize).min(width);
+    let y1 = (cy + radius as usize).min(height);
+
+    let mut sum_r = 0.0f32;
+    let mut sum_g = 0.0f32;
+    let mut sum_b = 0.0f32;
+    let mut count = 0usize;
+
+    for y in (y0..y1).step_by(2) {
+        let row = y * width;
+        for x in (x0..x1).step_by(2) {
+            let idx = row + x;
+            if alpha[idx] <= 0.03 {
+                let p4 = idx * 4;
+                sum_r += rgba[p4] as f32;
+                sum_g += rgba[p4 + 1] as f32;
+                sum_b += rgba[p4 + 2] as f32;
+                count += 1;
+            }
+        }
+    }
+
+    if count < 6 {
+        global_bg
+    } else {
+        let c = count as f32;
+        (sum_r / c, sum_g / c, sum_b / c)
+    }
+}
+
 pub fn decontaminate_edges(
     rgba: &[u8],
     alpha: &[f32],
@@ -35,7 +77,7 @@ pub fn decontaminate_edges(
 ) -> Vec<u8> {
     let n = width * height;
     let mut out = vec![0u8; n * 4];
-    let (bg_r, bg_g, bg_b) = estimate_bg(rgba, alpha);
+    let global_bg = estimate_bg(rgba, alpha);
     let radius: isize = 2;
 
     for y in 0..height {
@@ -59,9 +101,10 @@ pub fn decontaminate_edges(
             let r0 = rgba[p4] as f32;
             let g0 = rgba[p4 + 1] as f32;
             let b0 = rgba[p4 + 2] as f32;
+            let (bg_r, bg_g, bg_b) = estimate_local_bg(rgba, alpha, width, height, x, y, global_bg);
 
-            // Closed-Form Alpha Unmixing
-            let denom = a.max(0.12);
+            // Closed-Form Alpha Unmixing against local B(x,y)
+            let denom = a.max(0.14);
             let unmix_r = ((r0 - (1.0 - a) * bg_r) / denom).clamp(0.0, 255.0);
             let unmix_g = ((g0 - (1.0 - a) * bg_g) / denom).clamp(0.0, 255.0);
             let unmix_b = ((b0 - (1.0 - a) * bg_b) / denom).clamp(0.0, 255.0);
