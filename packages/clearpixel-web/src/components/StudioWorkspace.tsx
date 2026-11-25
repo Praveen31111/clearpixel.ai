@@ -99,6 +99,7 @@ export function StudioWorkspace({
   });
 
   const stageRef = useRef<HTMLDivElement>(null);
+  const mainRef = useRef<HTMLElement>(null);
   const cutoutCanvasRef = useRef<HTMLCanvasElement>(null);
   const originalImgRef = useRef<HTMLImageElement | null>(null);
   const historyRef = useRef<ImageData[]>([]);
@@ -294,15 +295,32 @@ export function StudioWorkspace({
     setSplitPos(pct);
   }, []);
 
+  // Non-passive wheel zoom so browser never logs passive preventDefault warning
+  useEffect(() => {
+    const el = mainRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      if (e.ctrlKey || Math.abs(e.deltaY) > 0) {
+        e.preventDefault();
+        const delta = e.deltaY < 0 ? 25 : -25;
+        setZoom((z) => Math.min(800, Math.max(25, z + delta)));
+      }
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
   useEffect(() => {
     if (!isDraggingSplit) return;
     const onMove = (e: PointerEvent) => updateSplitFromClientX(e.clientX);
     const onUp = () => setIsDraggingSplit(false);
     window.addEventListener('pointermove', onMove);
     window.addEventListener('pointerup', onUp);
+    window.addEventListener('pointercancel', onUp);
     return () => {
       window.removeEventListener('pointermove', onMove);
       window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointercancel', onUp);
     };
   }, [isDraggingSplit, updateSplitFromClientX]);
 
@@ -553,18 +571,13 @@ export function StudioWorkspace({
 
         {/* Center 60fps Interactive Canvas (Supports 25%-800% Photoshop Zoom & Pan) */}
         <main
-          onWheel={(e) => {
-            if (e.ctrlKey || Math.abs(e.deltaY) > 0) {
-              e.preventDefault();
-              const delta = e.deltaY < 0 ? 25 : -25;
-              setZoom((z) => Math.min(800, Math.max(25, z + delta)));
-            }
-          }}
+          ref={mainRef}
           className="flex-1 relative flex items-center justify-center p-3 sm:p-6 overflow-hidden"
         >
           <div
             ref={stageRef}
             onPointerDown={(e) => {
+              e.currentTarget.setPointerCapture?.(e.pointerId);
               if (e.button === 1 || interactionMode === 'pan') {
                 e.preventDefault();
                 setIsPanning(true);
@@ -625,13 +638,13 @@ export function StudioWorkspace({
             style={{
               transform: `translate3d(${pan.x}px, ${pan.y}px, 0) scale(${zoom / 100})`,
             }}
-            className={`relative w-full max-w-3xl aspect-[4/3] rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800 shadow-sm bg-checkerboard ${
+            className={`relative w-full max-w-3xl aspect-[4/3] rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800 shadow-sm bg-checkerboard touch-none ${
               interactionMode === 'brush'
-                ? 'cursor-none touch-none'
+                ? 'cursor-none'
                 : interactionMode === 'pan'
                 ? isPanning
-                  ? 'cursor-grabbing touch-none'
-                  : 'cursor-grab touch-none'
+                  ? 'cursor-grabbing'
+                  : 'cursor-grab'
                 : 'cursor-ew-resize'
             }`}
           >
