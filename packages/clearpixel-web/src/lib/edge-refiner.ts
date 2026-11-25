@@ -1,9 +1,13 @@
 /**
- * High-Speed Boundary-Block Studio Edge Refiner & Color Decontamination.
+ * High-Speed Boundary-Block Studio Edge Refiner & Closed-Form Alpha Unmixing.
  *
- * Supports two tuned modes:
- * - 'portrait': Preserves faint hair tips & wispy edges even on dark/black backgrounds (cutoff <= 3).
- * - 'product': Steep S-curve contrast for razor-sharp e-commerce product cutouts (bottles, shoes, boxes).
+ * Phase A Upgrades:
+ * 1. Auto Background Color Estimator: Samples pure background pixels (alpha <= 8) to detect
+ *    White (#FFF), Black (#000), or Colored studio backgrounds.
+ * 2. Closed-Form Alpha Unmixing:
+ *      F_clean = clamp((C - (1 - a) * B_est) / max(a, 0.12), 0, 255)
+ *    Mathematically strips white light wrap and black fringes from hair strands.
+ * 3. Dark-BG Hair Fringe Cleanup + 64x64 Boundary-Selective Block Processing.
  */
 
 export type SubjectMode = 'portrait' | 'product';
@@ -13,6 +17,38 @@ const LUT_SIZE = 3072;
 const EXP_LUT = new Float32Array(LUT_SIZE);
 for (let i = 0; i < LUT_SIZE; i++) {
   EXP_LUT[i] = Math.exp(-(i * 64) / 1600);
+}
+
+function estimateBackgroundColor(
+  rgba: Uint8ClampedArray,
+  alphaMask: Uint8Array,
+  totalPixels: number
+): { r: number; g: number; b: number; luma: number } {
+  let sumR = 0;
+  let sumG = 0;
+  let sumB = 0;
+  let count = 0;
+  const stride = Math.max(1, Math.floor(totalPixels / 15000));
+
+  for (let i = 0; i < totalPixels; i += stride) {
+    if (alphaMask[i] <= 8) {
+      const p4 = i * 4;
+      sumR += rgba[p4];
+      sumG += rgba[p4 + 1];
+      sumB += rgba[p4 + 2];
+      count++;
+    }
+  }
+
+  if (count === 0) {
+    return { r: 128, g: 128, b: 128, luma: 128 };
+  }
+
+  const r = sumR / count;
+  const g = sumG / count;
+  const b = sumB / count;
+  const luma = 0.2126 * r + 0.7152 * g + 0.0722 * b;
+  return { r, g, b, luma };
 }
 
 export function refineCutoutEdges(
@@ -26,12 +62,16 @@ export function refineCutoutEdges(
   const out = new Uint8ClampedArray(totalPixels * 4);
   const refinedAlpha = new Uint8Array(totalPixels);
 
-  // Portrait mode preserves faint hair strands (low=3); Product mode enforces sharp edges (low=22)
-  const lowCut = subject === 'portrait' ? 3 : 22;
+  // Stage 1: Estimate dominant background color (White / Black / Colored)
+  const bg = estimateBackgroundColor(rgba, alphaMask, totalPixels);
+  const isDarkBg = bg.luma < 45;
+  const isWhiteBg = bg.luma > 210;
+
+  const lowCut = subject === 'portrait' ? 4 : 22;
   const highCut = subject === 'portrait' ? 245 : 230;
   const span = highCut - lowCut;
 
-  // Pass 1: Mode-specific alpha contrast & hair-tip preservation
+  // Pass 1: Mode-specific alpha contrast & dark-background fringe suppression
   for (let i = 0; i < totalPixels; i++) {
     const a = alphaMask[i];
     if (a <= lowCut) {
@@ -41,16 +81,23 @@ export function refineCutoutEdges(
     } else {
       const t = (a - lowCut) / span;
       if (subject === 'portrait') {
-        // Gentle gamma lift (pow 0.85) so dark hair tips on black backgrounds aren't crushed
-        refinedAlpha[i] = Math.round(Math.pow(t, 0.85) * 255);
+        let lifted = Math.pow(t, 0.85) * 255;
+        // On pure black/dark backgrounds, suppress muddy empty border pixels matching bg luminance
+        if (isDarkBg && a < 42) {
+          const p4 = i * 4;
+          const pxLuma = 0.2126 * rgba[p4] + 0.7152 * rgba[p4 + 1] + 0.0722 * rgba[p4 + 2];
+          if (Math.abs(pxLuma - bg.luma) < 16) {
+            lifted *= 0.35;
+          }
+        }
+        refinedAlpha[i] = Math.round(lifted);
       } else {
-        // Crisp S-curve for hard product edges
         refinedAlpha[i] = Math.round(t * t * (3 - 2 * t) * 255);
       }
     }
   }
 
-  // Pass 2: Boundary-Selective 64x64 Block Processing
+  // Pass 2: Boundary-Selective 64x64 Block Processing + Closed-Form Alpha Unmixing
   for (let by = 0; by < height; by += BLOCK_SIZE) {
     const bh = Math.min(BLOCK_SIZE, height - by);
     for (let bx = 0; bx < width; bx += BLOCK_SIZE) {
@@ -77,9 +124,7 @@ export function refineCutoutEdges(
         }
       }
 
-      if (!isEdge && !hasFg) {
-        continue;
-      }
+      if (!isEdge && !hasFg) continue;
 
       if (!isEdge && hasFg) {
         for (let ty = 0; ty < bh; ty++) {
@@ -95,7 +140,6 @@ export function refineCutoutEdges(
         continue;
       }
 
-      // Boundary edge block: RGB-guided snapping + Halo Color Decontamination
       for (let ty = 0; ty < bh; ty++) {
         const y = by + ty;
         const rowOffset = y * width;
@@ -158,20 +202,38 @@ export function refineCutoutEdges(
             }
           }
 
-          const finalAlpha = alphaWeightSum > 0 ? Math.round(alphaSum / alphaWeightSum) : a;
+          let finalAlpha = alphaWeightSum > 0 ? Math.round(alphaSum / alphaWeightSum) : a;
+          // On pure white backgrounds, slightly tighten very faint outer glow
+          if (isWhiteBg && finalAlpha < 24) {
+            finalAlpha = Math.max(0, finalAlpha - 6);
+          }
+
+          if (finalAlpha === 0) continue;
+
+          // Closed-Form Alpha Unmixing: F = (C - (1 - a) * B_est) / max(a, 0.12)
+          const alphaNorm = finalAlpha / 255;
+          const denom = Math.max(alphaNorm, 0.12);
+          const unmixR = Math.max(0, Math.min(255, (r0 - (1 - alphaNorm) * bg.r) / denom));
+          const unmixG = Math.max(0, Math.min(255, (g0 - (1 - alphaNorm) * bg.g) / denom));
+          const unmixB = Math.max(0, Math.min(255, (b0 - (1 - alphaNorm) * bg.b) / denom));
 
           if (fgWeightSum > 0.01 && finalAlpha < 235) {
             const cleanR = fgR / fgWeightSum;
             const cleanG = fgG / fgWeightSum;
             const cleanB = fgB / fgWeightSum;
-            const blend = Math.min(0.82, (255 - finalAlpha) * 0.0039215686);
-            out[p4] = Math.round(r0 * (1 - blend) + cleanR * blend);
-            out[p4 + 1] = Math.round(g0 * (1 - blend) + cleanG * blend);
-            out[p4 + 2] = Math.round(b0 * (1 - blend) + cleanB * blend);
+            // Combine Closed-Form Unmixing (65%) + Nearby Foreground Pigment (35%)
+            const targetR = unmixR * 0.65 + cleanR * 0.35;
+            const targetG = unmixG * 0.65 + cleanG * 0.35;
+            const targetB = unmixB * 0.65 + cleanB * 0.35;
+            const blend = Math.min(0.88, (255 - finalAlpha) * 0.0039215686);
+
+            out[p4] = Math.round(r0 * (1 - blend) + targetR * blend);
+            out[p4 + 1] = Math.round(g0 * (1 - blend) + targetG * blend);
+            out[p4 + 2] = Math.round(b0 * (1 - blend) + targetB * blend);
           } else {
-            out[p4] = r0;
-            out[p4 + 1] = g0;
-            out[p4 + 2] = b0;
+            out[p4] = Math.round(unmixR);
+            out[p4 + 1] = Math.round(unmixG);
+            out[p4 + 2] = Math.round(unmixB);
           }
 
           out[p4 + 3] = finalAlpha;

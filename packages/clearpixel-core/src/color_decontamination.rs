@@ -1,6 +1,31 @@
-//! Color Decontamination (Halo & Background Spill Removal).
-//! Estimates clean foreground RGB from nearby definite-foreground pixels and strips
-//! ambient background color bleed from semi-transparent hair and edge pixels.
+//! Closed-Form Alpha Unmixing & Halo Decontamination in Rust.
+//! Estimates outer background color B_est and applies:
+//!   F_clean = clamp((C - (1 - a) * B_est) / max(a, 0.12), 0, 255)
+
+fn estimate_bg(rgba: &[u8], alpha: &[f32]) -> (f32, f32, f32) {
+    let mut sum_r = 0.0f32;
+    let mut sum_g = 0.0f32;
+    let mut sum_b = 0.0f32;
+    let mut count = 0usize;
+    let step = (alpha.len() / 10_000).max(1);
+
+    for i in (0..alpha.len()).step_by(step) {
+        if alpha[i] <= 0.03 {
+            let p4 = i * 4;
+            sum_r += rgba[p4] as f32;
+            sum_g += rgba[p4 + 1] as f32;
+            sum_b += rgba[p4 + 2] as f32;
+            count += 1;
+        }
+    }
+
+    if count == 0 {
+        (128.0, 128.0, 128.0)
+    } else {
+        let c = count as f32;
+        (sum_r / c, sum_g / c, sum_b / c)
+    }
+}
 
 pub fn decontaminate_edges(
     rgba: &[u8],
@@ -10,6 +35,7 @@ pub fn decontaminate_edges(
 ) -> Vec<u8> {
     let n = width * height;
     let mut out = vec![0u8; n * 4];
+    let (bg_r, bg_g, bg_b) = estimate_bg(rgba, alpha);
     let radius: isize = 2;
 
     for y in 0..height {
@@ -19,7 +45,6 @@ pub fn decontaminate_edges(
             let a = alpha[idx];
 
             if a <= 0.004 {
-                // Transparent pixel
                 continue;
             }
 
@@ -34,6 +59,12 @@ pub fn decontaminate_edges(
             let r0 = rgba[p4] as f32;
             let g0 = rgba[p4 + 1] as f32;
             let b0 = rgba[p4 + 2] as f32;
+
+            // Closed-Form Alpha Unmixing
+            let denom = a.max(0.12);
+            let unmix_r = ((r0 - (1.0 - a) * bg_r) / denom).clamp(0.0, 255.0);
+            let unmix_g = ((g0 - (1.0 - a) * bg_g) / denom).clamp(0.0, 255.0);
+            let unmix_b = ((b0 - (1.0 - a) * bg_b) / denom).clamp(0.0, 255.0);
 
             let mut fg_r = 0.0f32;
             let mut fg_g = 0.0f32;
@@ -72,15 +103,18 @@ pub fn decontaminate_edges(
                 let clean_r = fg_r / fg_weight;
                 let clean_g = fg_g / fg_weight;
                 let clean_b = fg_b / fg_weight;
-                let blend = (1.0 - a).min(0.75);
+                let target_r = unmix_r * 0.65 + clean_r * 0.35;
+                let target_g = unmix_g * 0.65 + clean_g * 0.35;
+                let target_b = unmix_b * 0.65 + clean_b * 0.35;
+                let blend = (1.0 - a).min(0.85);
 
-                out[p4] = (r0 * (1.0 - blend) + clean_r * blend).round().clamp(0.0, 255.0) as u8;
-                out[p4 + 1] = (g0 * (1.0 - blend) + clean_g * blend).round().clamp(0.0, 255.0) as u8;
-                out[p4 + 2] = (b0 * (1.0 - blend) + clean_b * blend).round().clamp(0.0, 255.0) as u8;
+                out[p4] = (r0 * (1.0 - blend) + target_r * blend).round().clamp(0.0, 255.0) as u8;
+                out[p4 + 1] = (g0 * (1.0 - blend) + target_g * blend).round().clamp(0.0, 255.0) as u8;
+                out[p4 + 2] = (b0 * (1.0 - blend) + target_b * blend).round().clamp(0.0, 255.0) as u8;
             } else {
-                out[p4] = rgba[p4];
-                out[p4 + 1] = rgba[p4 + 1];
-                out[p4 + 2] = rgba[p4 + 2];
+                out[p4] = unmix_r.round() as u8;
+                out[p4 + 1] = unmix_g.round() as u8;
+                out[p4 + 2] = unmix_b.round() as u8;
             }
 
             out[p4 + 3] = (a * 255.0).round().clamp(0.0, 255.0) as u8;

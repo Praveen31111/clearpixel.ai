@@ -97,10 +97,13 @@ export function StudioWorkspace({
     brushSize: 30,
     feather: 5,
   });
+  const [defringe, setDefringe] = useState(0);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const cutoutCanvasRef = useRef<HTMLCanvasElement>(null);
+  const baseCutoutDataRef = useRef<ImageData | null>(null);
+  const defringeRafRef = useRef<number | null>(null);
   const originalImgRef = useRef<HTMLImageElement | null>(null);
   const historyRef = useRef<ImageData[]>([]);
   const historyIdxRef = useRef(-1);
@@ -124,6 +127,8 @@ export function StudioWorkspace({
         ctx.drawImage(cutImg, 0, 0, canvas.width, canvas.height);
 
         const initial = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        baseCutoutDataRef.current = initial;
+        setDefringe(0);
         historyRef.current = [initial];
         historyIdxRef.current = 0;
         setHistoryState({ index: 0, length: 1 });
@@ -133,6 +138,49 @@ export function StudioWorkspace({
       cancelled = true;
     };
   }, [image.cutoutUrl, image.originalUrl, image.width, image.height]);
+
+  // Real-time 60fps Defringe pass to tighten residual white/black hair halos
+  const handleDefringeChange = useCallback((level: number) => {
+    setDefringe(level);
+    if (defringeRafRef.current) cancelAnimationFrame(defringeRafRef.current);
+    defringeRafRef.current = requestAnimationFrame(() => {
+      const base = baseCutoutDataRef.current;
+      const canvas = cutoutCanvasRef.current;
+      const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+      if (!base || !canvas || !ctx) return;
+
+      if (level === 0) {
+        ctx.putImageData(base, 0, 0);
+        return;
+      }
+
+      const src = base.data;
+      const next = new ImageData(base.width, base.height);
+      const dst = next.data;
+      const erode = level * 1.15;
+      const scale = 1 / Math.max(0.25, 1 - level * 0.0045);
+
+      for (let i = 0; i < src.length; i += 4) {
+        const a = src[i + 3];
+        if (a === 0) continue;
+        if (a >= 250) {
+          dst[i] = src[i];
+          dst[i + 1] = src[i + 1];
+          dst[i + 2] = src[i + 2];
+          dst[i + 3] = 255;
+          continue;
+        }
+        const newA = Math.max(0, Math.min(255, Math.round((a - erode) * scale)));
+        if (newA === 0) continue;
+        dst[i] = src[i];
+        dst[i + 1] = src[i + 1];
+        dst[i + 2] = src[i + 2];
+        dst[i + 3] = newA;
+      }
+
+      ctx.putImageData(next, 0, 0);
+    });
+  }, []);
 
   const handleUndo = useCallback(() => {
     const canvas = cutoutCanvasRef.current;
@@ -1029,6 +1077,26 @@ export function StudioWorkspace({
                     onChange={(e) =>
                       setRefineSettings((s) => ({ ...s, feather: Number(e.target.value) }))
                     }
+                    className="w-full studio-slider"
+                  />
+                </div>
+
+                {/* Live 60fps Defringe Slider (White/Black Halo Tightener) */}
+                <div className="space-y-1.5 pt-1 border-t border-zinc-100 dark:border-zinc-800/80">
+                  <div className="flex items-center justify-between text-xs">
+                    <span className="text-zinc-600 dark:text-zinc-400 font-medium">
+                      Defringe Hair
+                    </span>
+                    <span className="font-mono text-zinc-700 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-900 px-1.5 py-0.5 rounded">
+                      {defringe}%
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={100}
+                    value={defringe}
+                    onChange={(e) => handleDefringeChange(Number(e.target.value))}
                     className="w-full studio-slider"
                   />
                 </div>
