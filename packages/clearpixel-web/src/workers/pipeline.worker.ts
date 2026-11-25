@@ -12,6 +12,10 @@ import type { SubjectMode } from '../lib/edge-refiner';
 // Configure browser-only caching and self-hosted WebGPU+WASM runtime (/public/ort/, 16MB)
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+const isLocalhost =
+  typeof self !== 'undefined' &&
+  (self.location.hostname === 'localhost' || self.location.hostname === '127.0.0.1');
+env.remoteHost = isLocalhost ? 'https://huggingface.co/' : `${self.location.origin}/hf/`;
 if (env.backends?.onnx?.wasm) {
   env.backends.onnx.wasm.wasmPaths = {
     mjs: '/ort/ort-wasm-simd-threaded.jspi.mjs',

@@ -1,7 +1,9 @@
 {
   "name": "clearpixel-ai",
+  "main": "./worker.js",
   "compatibility_date": "2025-01-01",
   "assets": {
-    "directory": "./packages/clearpixel-web/out"
+    "directory": "./packages/clearpixel-web/out",
+    "binding": "ASSETS"
   }
 }
