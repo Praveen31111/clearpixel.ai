@@ -2,14 +2,12 @@ import * as Comlink from 'comlink';
 import {
   AutoModel,
   AutoProcessor,
-  SamModel,
   RawImage,
   env,
   pipeline,
 } from '@huggingface/transformers';
 import { detectHardware, HardwareCapabilities } from '../lib/hardware-detect';
 import { runStudioMatting } from '../lib/wasm-bridge';
-import { splitSubjectLayers, SplitLayerBlob } from '../lib/layer-splitter';
 import type { SubjectMode } from '../lib/edge-refiner';
 import type { UpscaleScale } from '../types/studio';
 
@@ -55,9 +53,6 @@ const ULTRA_1024_MODEL_ID = 'onnx-community/BiRefNet_lite-ONNX';
 const UPSCALE_2X_MODEL_ID = 'Xenova/swin2SR-classical-sr-x2-64';
 const UPSCALE_4X_MODEL_ID = 'Xenova/swin2SR-realworld-sr-x4-64-bsrgan-psnr';
 
-// Apache-2.0 Interactive Click-to-Select Subject model (SlimSAM)
-const SAM_MODEL_ID = 'Xenova/slimsam-77-uniform';
-
 export type QualityMode = 'fast' | 'ultra';
 
 export interface ProgressPayload {
@@ -72,7 +67,6 @@ export interface CutoutResult {
   height: number;
   latencyMs: number;
   backendLabel: string;
-  layers?: SplitLayerBlob[];
 }
 
 interface EngineInstance {
@@ -87,44 +81,6 @@ interface EngineInstance {
 const engineCache = new Map<string, Promise<EngineInstance>>();
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const upscalerCache = new Map<string, Promise<any>>();
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-let samEnginePromise: Promise<{ model: any; processor: any }> | null = null;
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const samEmbedCache = new Map<string, any>();
-
-async function getSamEngine(onProgress?: (p: ProgressPayload) => void) {
-  if (samEnginePromise) return samEnginePromise;
-  samEnginePromise = (async () => {
-    const hw = await detectHardware();
-    onProgress?.({ stage: 'init', progress: 15, message: 'Preparing subject picker…' });
-    const processor = await AutoProcessor.from_pretrained(SAM_MODEL_ID);
-    const loadSam = (device: 'webgpu' | 'wasm', dtype: 'fp16' | 'fp32') =>
-      SamModel.from_pretrained(SAM_MODEL_ID, {
-        device,
-        dtype,
-        progress_callback: (info: { status?: string; progress?: number }) => {
-          if (info.status === 'progress' && typeof info.progress === 'number') {
-            onProgress?.({
-              stage: 'downloading',
-              progress: Math.min(55, Math.round(info.progress * 0.55)),
-              message: 'Preparing subject picker…',
-            });
-          }
-        },
-      });
-    try {
-      const model = await loadSam(
-        hw.device === 'webgpu' ? 'webgpu' : 'wasm',
-        hw.device === 'webgpu' && hw.f16 ? 'fp16' : 'fp32'
-      );
-      return { model, processor };
-    } catch {
-      const model = await loadSam('wasm', 'fp32');
-      return { model, processor };
-    }
-  })();
-  return samEnginePromise;
-}
 
 async function getUpscaler(scale: UpscaleScale, onProgress?: (p: ProgressPayload) => void) {
   const key = `upscale-${scale}`;
@@ -368,9 +324,6 @@ const workerApi = {
       subject
     );
 
-    // Auto-split separated subjects (2-3 people/objects) into independent layers (<20ms)
-    const layers = await splitSubjectLayers(matting.rgba, image.width, image.height);
-
     let cutoutBlob: Blob;
     if (matting.pngBytes) {
       cutoutBlob = new Blob([new Uint8Array(matting.pngBytes)], { type: 'image/png' });
@@ -399,7 +352,6 @@ const workerApi = {
       height: image.height,
       latencyMs,
       backendLabel: `${hw.label}${engineSuffix}`,
-      layers: layers.length >= 2 ? layers : undefined,
     };
   },
 
@@ -586,93 +538,6 @@ const workerApi = {
       height: outH,
       latencyMs,
       backendLabel: `AI Upscale ${scale}×`,
-    };
-  },
-
-  async selectSubjectAtPoint(
-    imageUrl: string,
-    normX: number,
-    normY: number,
-    onProgress?: (p: ProgressPayload) => void
-  ): Promise<CutoutResult> {
-    const start = performance.now();
-    const image = await RawImage.fromURL(imageUrl);
-    const sam = await getSamEngine(onProgress);
-
-    onProgress?.({
-      stage: 'inferring',
-      progress: 65,
-      message: 'Selecting subject…',
-    });
-
-    let cachedEmbed = samEmbedCache.get(imageUrl);
-    if (!cachedEmbed) {
-      const imageInputs = await sam.processor(image);
-      cachedEmbed = await sam.model.get_image_embeddings(imageInputs);
-      samEmbedCache.set(imageUrl, cachedEmbed);
-    }
-
-    const px = Math.round(Math.max(0, Math.min(1, normX)) * image.width);
-    const py = Math.round(Math.max(0, Math.min(1, normY)) * image.height);
-
-    const pointInputs = await sam.processor(image, {
-      input_points: [[[px, py]]],
-      input_labels: [[1]],
-    });
-
-    const outputs = await sam.model({ ...cachedEmbed, ...pointInputs });
-    const masks = await sam.processor.post_process_masks(
-      outputs.pred_masks,
-      pointInputs.original_sizes,
-      pointInputs.reshaped_input_sizes
-    );
-
-    // Pick candidate mask with highest IoU score
-    const scores = outputs.iou_scores?.data as Float32Array | undefined;
-    let bestIdx = 0;
-    if (scores && scores.length > 1) {
-      for (let i = 1; i < scores.length; i++) {
-        if (scores[i] > scores[bestIdx]) bestIdx = i;
-      }
-    }
-
-    const maskTensor = masks[0][0];
-    const maskData = maskTensor.data as Uint8Array;
-    const planeSize = image.width * image.height;
-    const offset = bestIdx * planeSize;
-    const alphaMask = new Uint8Array(planeSize);
-    for (let i = 0; i < planeSize; i++) {
-      alphaMask[i] = maskData[offset + i] ? 255 : 0;
-    }
-
-    const rgbaImage = image.rgba();
-    const matting = await runStudioMatting(
-      rgbaImage.data as unknown as Uint8ClampedArray,
-      alphaMask,
-      image.width,
-      image.height,
-      'portrait'
-    );
-
-    const outCanvas = new OffscreenCanvas(image.width, image.height);
-    const outCtx = outCanvas.getContext('2d');
-    if (!outCtx) throw new Error('OffscreenCanvas 2D context unavailable');
-    outCtx.putImageData(
-      new ImageData(new Uint8ClampedArray(matting.rgba), image.width, image.height),
-      0,
-      0
-    );
-    const cutoutBlob = await outCanvas.convertToBlob({ type: 'image/png' });
-    const latencyMs = Math.round(performance.now() - start);
-
-    onProgress?.({ stage: 'ready', progress: 100, message: 'Done' });
-
-    return {
-      cutoutBlob,
-      width: image.width,
-      height: image.height,
-      latencyMs,
-      backendLabel: 'Magic Subject Layer',
     };
   },
 };

@@ -26,14 +26,6 @@ import {
   User,
   Package,
   Sparkles,
-  Layers,
-  Eye,
-  EyeOff,
-  Crosshair,
-  Move,
-  ArrowUp,
-  ArrowDown,
-  Trash2,
 } from 'lucide-react';
 import { Logo } from './Logo';
 import type { SubjectMode } from '@/lib/edge-refiner';
@@ -46,7 +38,6 @@ import {
   ProcessingState,
   RefineSettings,
   StudioImage,
-  StudioLayer,
   UpscaleScale,
 } from '@/types/studio';
 
@@ -60,7 +51,6 @@ interface StudioWorkspaceProps {
   onChangeSubjectMode: (mode: SubjectMode) => void;
   onChangeUpscaleScale: (scale: UpscaleScale) => void;
   onUpscaleCutout: () => void;
-  onPickSubjectAtPoint?: (normX: number, normY: number) => Promise<StudioLayer | null>;
   onToggleDark: () => void;
   onReprocessUltra?: () => void;
   onReset: () => void;
@@ -84,19 +74,16 @@ export function StudioWorkspace({
   onChangeSubjectMode,
   onChangeUpscaleScale,
   onUpscaleCutout,
-  onPickSubjectAtPoint,
   onToggleDark,
   onReprocessUltra,
   onReset,
 }: StudioWorkspaceProps) {
   const [splitPos, setSplitPos] = useState(50);
   const [isDraggingSplit, setIsDraggingSplit] = useState(false);
-  const [interactionMode, setInteractionMode] = useState<'split' | 'brush' | 'pan' | 'pick' | 'move'>('split');
+  const [interactionMode, setInteractionMode] = useState<'split' | 'brush' | 'pan'>('split');
   const [prevToolBeforePan, setPrevToolBeforePan] = useState<'split' | 'brush'>('split');
   const [isPainting, setIsPainting] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
-  const [isMovingLayer, setIsMovingLayer] = useState(false);
-  const moveStartRef = useRef<{ x: number; y: number; ox: number; oy: number } | null>(null);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const panStartRef = useRef<{ x: number; y: number; panX: number; panY: number } | null>(null);
   // Screen-space cursor coordinates relative to mainRef (accurate at any 25%-800% zoom!)
@@ -106,48 +93,9 @@ export function StudioWorkspace({
   const [leftTab, setLeftTab] = useState<LeftRailTab>('canvas');
   const [mobileSheet, setMobileSheet] = useState<'background' | 'brush'>('background');
   const [showExportMenu, setShowExportMenu] = useState(false);
-  const [layersOpen, setLayersOpen] = useState(true);
   const [bgOpen, setBgOpen] = useState(true);
   const [refineOpen, setRefineOpen] = useState(true);
   const [historyState, setHistoryState] = useState({ index: -1, length: 0 });
-
-  const [layers, setLayers] = useState<StudioLayer[]>(() =>
-    image.layers?.length
-      ? image.layers
-      : [
-          {
-            id: 'layer-default',
-            name: 'Subject 1',
-            visible: true,
-            cutoutUrl: image.cutoutUrl,
-            offsetX: 0,
-            offsetY: 0,
-          },
-        ]
-  );
-  const [activeLayerId, setActiveLayerId] = useState<string>(
-    () => image.layers?.[0]?.id ?? 'layer-default'
-  );
-
-  // Sync layers when image.layers updates (e.g. after AI cutout / auto-split / upscale)
-  useEffect(() => {
-    const nextLayers: StudioLayer[] = image.layers?.length
-      ? image.layers
-      : [
-          {
-            id: `layer-${image.id}`,
-            name: 'Subject 1',
-            visible: true,
-            cutoutUrl: image.cutoutUrl,
-            offsetX: 0,
-            offsetY: 0,
-          },
-        ];
-    setLayers(nextLayers);
-    setActiveLayerId(nextLayers[0].id);
-  }, [image.id, image.cutoutUrl, image.layers]);
-
-  const activeLayer = layers.find((l) => l.id === activeLayerId) ?? layers[0];
 
   const [bgSettings, setBgSettings] = useState<BackgroundSettings>({
     mode: 'transparent',
@@ -177,11 +125,10 @@ export function StudioWorkspace({
   const lastBrushPtRef = useRef<{ x: number; y: number } | null>(null);
   const bgPhotoInputRef = useRef<HTMLInputElement>(null);
 
-  // Sync live cutout canvas with the currently selected active layer
+  // Sync live cutout canvas and original image ref whenever image.cutoutUrl updates
   useEffect(() => {
     let cancelled = false;
-    const targetUrl = activeLayer?.cutoutUrl ?? image.cutoutUrl;
-    Promise.all([loadImg(targetUrl), loadImg(image.originalUrl)]).then(
+    Promise.all([loadImg(image.cutoutUrl), loadImg(image.originalUrl)]).then(
       ([cutImg, origImg]) => {
         if (cancelled) return;
         originalImgRef.current = origImg;
@@ -206,7 +153,7 @@ export function StudioWorkspace({
     return () => {
       cancelled = true;
     };
-  }, [activeLayer?.id, activeLayer?.cutoutUrl, image.cutoutUrl, image.originalUrl, image.width, image.height]);
+  }, [image.cutoutUrl, image.originalUrl, image.width, image.height]);
 
   // Real-time 60fps Defringe pass to tighten residual white/black hair halos
   const handleDefringeChange = useCallback((level: number) => {
@@ -491,8 +438,8 @@ export function StudioWorkspace({
     };
   }, [isDraggingSplit, updateSplitFromClientX]);
 
-  // Real client-side full-resolution canvas export (composites all visible layers in z-order)
-  const handleExport = async (format: ExportFormat, activeOnly = false) => {
+  // Real client-side full-resolution canvas export (includes manual Keep/Erase edits)
+  const handleExport = async (format: ExportFormat) => {
     setShowExportMenu(false);
     const baseName = image.name.replace(/\.[^/.]+$/, '');
 
@@ -504,42 +451,28 @@ export function StudioWorkspace({
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     // 1. Paint background if not transparent (or if JPEG)
-    if (!activeOnly && (bgSettings.mode === 'solid' || (format === 'jpeg' && bgSettings.mode === 'transparent'))) {
+    if (bgSettings.mode === 'solid' || (format === 'jpeg' && bgSettings.mode === 'transparent')) {
       ctx.fillStyle = bgSettings.mode === 'solid' ? bgSettings.solidColor : '#FFFFFF';
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-    } else if (!activeOnly && bgSettings.mode === 'gradient') {
+    } else if (bgSettings.mode === 'gradient') {
       const grad = ctx.createLinearGradient(0, 0, canvas.width, canvas.height);
       grad.addColorStop(0, '#2563EB');
       grad.addColorStop(1, '#60A5FA');
       ctx.fillStyle = grad;
       ctx.fillRect(0, 0, canvas.width, canvas.height);
-    } else if (!activeOnly && bgSettings.mode === 'photo' && bgSettings.customPhotoUrl) {
+    } else if (bgSettings.mode === 'photo' && bgSettings.customPhotoUrl) {
       const bgImg = await loadImg(bgSettings.customPhotoUrl);
       if (bgSettings.blurPx > 0) ctx.filter = `blur(${bgSettings.blurPx}px)`;
       ctx.drawImage(bgImg, 0, 0, canvas.width, canvas.height);
       ctx.filter = 'none';
     }
 
-    // 2. Draw visible layers bottom-to-top
-    const stageRect = stageRef.current?.getBoundingClientRect();
-    const pxScale = stageRect && stageRect.width > 0 ? image.width / stageRect.width : 1;
-
-    if (activeOnly) {
-      if (cutoutCanvasRef.current && cutoutCanvasRef.current.width > 0) {
-        ctx.drawImage(cutoutCanvasRef.current, 0, 0, canvas.width, canvas.height);
-      }
+    // 2. Draw live edited cutout canvas (falls back to cutoutUrl if canvas not mounted)
+    if (cutoutCanvasRef.current && cutoutCanvasRef.current.width > 0) {
+      ctx.drawImage(cutoutCanvasRef.current, 0, 0, canvas.width, canvas.height);
     } else {
-      for (const layer of [...layers].reverse()) {
-        if (!layer.visible) continue;
-        const dx = Math.round(layer.offsetX * pxScale);
-        const dy = Math.round(layer.offsetY * pxScale);
-        if (layer.id === activeLayer?.id && cutoutCanvasRef.current && cutoutCanvasRef.current.width > 0) {
-          ctx.drawImage(cutoutCanvasRef.current, dx, dy, canvas.width, canvas.height);
-        } else {
-          const lImg = await loadImg(layer.cutoutUrl);
-          ctx.drawImage(lImg, dx, dy, canvas.width, canvas.height);
-        }
-      }
+      const fgImg = await loadImg(image.cutoutUrl);
+      ctx.drawImage(fgImg, 0, 0, canvas.width, canvas.height);
     }
 
     const mime =
@@ -738,17 +671,6 @@ export function StudioWorkspace({
                   <span className="font-semibold text-zinc-900 dark:text-zinc-100">JPEG (Solid BG)</span>
                   <span className="font-mono text-[10px] text-zinc-400">95%</span>
                 </button>
-                {layers.length > 1 && (
-                  <button
-                    onClick={() => handleExport('png', true)}
-                    className="w-full px-3.5 py-2 text-left text-xs hover:bg-zinc-100 dark:hover:bg-zinc-800 flex items-center justify-between border-t border-zinc-100 dark:border-zinc-800 mt-1 pt-2"
-                  >
-                    <span className="font-semibold text-blue-600 dark:text-blue-400">
-                      Selected Layer Only
-                    </span>
-                    <span className="font-mono text-[10px] text-zinc-400">PNG</span>
-                  </button>
-                )}
               </div>
             )}
           </div>
@@ -828,7 +750,7 @@ export function StudioWorkspace({
 
           <div
             ref={stageRef}
-            onPointerDown={async (e) => {
+            onPointerDown={(e) => {
               e.currentTarget.setPointerCapture?.(e.pointerId);
               if (e.button === 1 || interactionMode === 'pan') {
                 e.preventDefault();
@@ -838,28 +760,6 @@ export function StudioWorkspace({
                   y: e.clientY,
                   panX: pan.x,
                   panY: pan.y,
-                };
-              } else if (interactionMode === 'pick' && onPickSubjectAtPoint && !processing.isProcessing) {
-                const pt = clientToImageCoords(e.clientX, e.clientY);
-                if (pt) {
-                  const newLayer = await onPickSubjectAtPoint(
-                    pt.x / image.width,
-                    pt.y / image.height
-                  );
-                  if (newLayer) {
-                    setLayers((prev) => [newLayer, ...prev]);
-                    setActiveLayerId(newLayer.id);
-                    setInteractionMode('split');
-                    setSplitPos(0);
-                  }
-                }
-              } else if (interactionMode === 'move' && activeLayer) {
-                setIsMovingLayer(true);
-                moveStartRef.current = {
-                  x: e.clientX,
-                  y: e.clientY,
-                  ox: activeLayer.offsetX,
-                  oy: activeLayer.offsetY,
                 };
               } else if (interactionMode === 'brush' && !processing.isProcessing) {
                 setIsPainting(true);
@@ -878,18 +778,6 @@ export function StudioWorkspace({
                 });
                 return;
               }
-              if (isMovingLayer && moveStartRef.current && activeLayer) {
-                const dx = (e.clientX - moveStartRef.current.x) / (zoom / 100);
-                const dy = (e.clientY - moveStartRef.current.y) / (zoom / 100);
-                const nx = moveStartRef.current.ox + dx;
-                const ny = moveStartRef.current.oy + dy;
-                setLayers((prev) =>
-                  prev.map((l) =>
-                    l.id === activeLayer.id ? { ...l, offsetX: nx, offsetY: ny } : l
-                  )
-                );
-                return;
-              }
               if (interactionMode === 'brush' && isPainting) {
                 paintBrushAt(e.clientX, e.clientY);
               }
@@ -898,10 +786,6 @@ export function StudioWorkspace({
               if (isPanning) {
                 setIsPanning(false);
                 panStartRef.current = null;
-              }
-              if (isMovingLayer) {
-                setIsMovingLayer(false);
-                moveStartRef.current = null;
               }
               if (isPainting) {
                 setIsPainting(false);
@@ -913,10 +797,6 @@ export function StudioWorkspace({
               if (isPanning) {
                 setIsPanning(false);
                 panStartRef.current = null;
-              }
-              if (isMovingLayer) {
-                setIsMovingLayer(false);
-                moveStartRef.current = null;
               }
               if (isPainting) {
                 setIsPainting(false);
@@ -931,10 +811,6 @@ export function StudioWorkspace({
             className={`relative w-full max-w-3xl aspect-[4/3] rounded-xl overflow-hidden border border-zinc-200 dark:border-zinc-800 shadow-sm bg-checkerboard touch-none ${
               interactionMode === 'brush'
                 ? 'cursor-none'
-                : interactionMode === 'pick'
-                ? 'cursor-crosshair'
-                : interactionMode === 'move'
-                ? 'cursor-move'
                 : interactionMode === 'pan'
                 ? isPanning
                   ? 'cursor-grabbing'
@@ -947,41 +823,11 @@ export function StudioWorkspace({
               <div className="absolute inset-0" style={renderBackgroundStyle()} />
             )}
 
-            {/* Render all visible layers in z-order (bottom-to-top) */}
-            {[...layers].reverse().map((layer) => {
-              if (!layer.visible) return null;
-              const isActive = layer.id === activeLayer?.id;
-              if (isActive) {
-                return (
-                  <canvas
-                    key={layer.id}
-                    ref={cutoutCanvasRef}
-                    style={{
-                      transform: `translate(${layer.offsetX}px, ${layer.offsetY}px)`,
-                    }}
-                    className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-                  />
-                );
-              }
-              return (
-                <img
-                  key={layer.id}
-                  src={layer.cutoutUrl}
-                  alt={layer.name}
-                  draggable={false}
-                  style={{
-                    transform: `translate(${layer.offsetX}px, ${layer.offsetY}px)`,
-                  }}
-                  className="absolute inset-0 w-full h-full object-contain pointer-events-none"
-                />
-              );
-            })}
-
-            {interactionMode === 'pick' && !processing.isProcessing && (
-              <div className="absolute top-3 left-1/2 -translate-x-1/2 z-30 px-3 py-1 rounded-full bg-blue-600 text-white text-[11px] font-semibold shadow-md pointer-events-none">
-                Tap any person or object to add Layer
-              </div>
-            )}
+            {/* Live Editable Cutout Foreground Canvas */}
+            <canvas
+              ref={cutoutCanvasRef}
+              className="absolute inset-0 w-full h-full object-contain pointer-events-none"
+            />
 
             {/* Original Layer (Clipped to Left of Split Slider, or 100% when holding Space) */}
             <div
@@ -1175,152 +1021,6 @@ export function StudioWorkspace({
                   className="w-full studio-slider"
                 />
               </div>
-            </div>
-          )}
-
-          {/* Photoshop-Style Layers Panel */}
-          {appTool === 'remove-bg' && (
-            <div className="border-b border-zinc-200 dark:border-zinc-800 p-4">
-              <button
-                onClick={() => setLayersOpen((v) => !v)}
-                className="w-full flex items-center justify-between text-sm font-semibold text-zinc-900 dark:text-zinc-100"
-              >
-                <span className="inline-flex items-center gap-1.5">
-                  <Layers className="w-4 h-4 text-blue-600" />
-                  <span>Layers ({layers.length})</span>
-                </span>
-                {layersOpen ? <ChevronUp className="w-4 h-4 text-zinc-400" /> : <ChevronDown className="w-4 h-4 text-zinc-400" />}
-              </button>
-
-              {layersOpen && (
-                <div className="mt-3 space-y-2.5">
-                  <div className="grid grid-cols-2 gap-1.5">
-                    {onPickSubjectAtPoint && (
-                      <button
-                        type="button"
-                        disabled={processing.isProcessing}
-                        onClick={() => {
-                          setInteractionMode((m) => (m === 'pick' ? 'split' : 'pick'));
-                          setSplitPos(0);
-                        }}
-                        className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold inline-flex items-center justify-center gap-1 border transition-colors ${
-                          interactionMode === 'pick'
-                            ? 'bg-blue-600 text-white border-blue-600'
-                            : 'bg-zinc-50 dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100'
-                        }`}
-                      >
-                        <Crosshair className="w-3.5 h-3.5" />
-                        <span>+ Pick Subject</span>
-                      </button>
-                    )}
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setInteractionMode((m) => (m === 'move' ? 'split' : 'move'));
-                        setSplitPos(0);
-                      }}
-                      className={`py-1.5 px-2 rounded-lg text-[11px] font-semibold inline-flex items-center justify-center gap-1 border transition-colors ${
-                        interactionMode === 'move'
-                          ? 'bg-blue-600 text-white border-blue-600'
-                          : 'bg-zinc-50 dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-800 hover:bg-zinc-100'
-                      }`}
-                    >
-                      <Move className="w-3.5 h-3.5" />
-                      <span>Move Layer</span>
-                    </button>
-                  </div>
-
-                  <div className="space-y-1.5 max-h-40 overflow-y-auto pr-0.5">
-                    {layers.map((layer, idx) => {
-                      const isActive = layer.id === activeLayer?.id;
-                      return (
-                        <div
-                          key={layer.id}
-                          onClick={() => setActiveLayerId(layer.id)}
-                          className={`flex items-center gap-2 p-1.5 rounded-lg border cursor-pointer transition-colors ${
-                            isActive
-                              ? 'border-blue-600 bg-blue-50/60 dark:bg-blue-950/30'
-                              : 'border-zinc-200/80 dark:border-zinc-800 bg-white dark:bg-zinc-900 hover:bg-zinc-50'
-                          }`}
-                        >
-                          <button
-                            type="button"
-                            onClick={(e) => {
-                              e.stopPropagation();
-                              setLayers((prev) =>
-                                prev.map((l) =>
-                                  l.id === layer.id ? { ...l, visible: !l.visible } : l
-                                )
-                              );
-                            }}
-                            title={layer.visible ? 'Hide layer' : 'Show layer'}
-                            className="p-1 text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-100"
-                          >
-                            {layer.visible ? <Eye className="w-3.5 h-3.5" /> : <EyeOff className="w-3.5 h-3.5 opacity-40" />}
-                          </button>
-
-                          <div className="w-7 h-7 rounded bg-checkerboard border border-zinc-200 dark:border-zinc-700 overflow-hidden shrink-0">
-                            <img src={layer.cutoutUrl} alt={layer.name} className="w-full h-full object-contain" />
-                          </div>
-
-                          <span className="flex-1 text-xs font-medium text-zinc-800 dark:text-zinc-200 truncate">
-                            {layer.name}
-                          </span>
-
-                          {layers.length > 1 && (
-                            <div className="flex items-center gap-0.5">
-                              <button
-                                type="button"
-                                disabled={idx === 0}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setLayers((prev) => {
-                                    const copy = [...prev];
-                                    [copy[idx - 1], copy[idx]] = [copy[idx], copy[idx - 1]];
-                                    return copy;
-                                  });
-                                }}
-                                className="p-0.5 text-zinc-400 hover:text-zinc-700 disabled:opacity-25"
-                              >
-                                <ArrowUp className="w-3 h-3" />
-                              </button>
-                              <button
-                                type="button"
-                                disabled={idx === layers.length - 1}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setLayers((prev) => {
-                                    const copy = [...prev];
-                                    [copy[idx + 1], copy[idx]] = [copy[idx], copy[idx + 1]];
-                                    return copy;
-                                  });
-                                }}
-                                className="p-0.5 text-zinc-400 hover:text-zinc-700 disabled:opacity-25"
-                              >
-                                <ArrowDown className="w-3 h-3" />
-                              </button>
-                              <button
-                                type="button"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  setLayers((prev) => {
-                                    const next = prev.filter((l) => l.id !== layer.id);
-                                    if (isActive && next.length > 0) setActiveLayerId(next[0].id);
-                                    return next;
-                                  });
-                                }}
-                                className="p-0.5 text-zinc-400 hover:text-red-500"
-                              >
-                                <Trash2 className="w-3 h-3" />
-                              </button>
-                            </div>
-                          )}
-                        </div>
-                      );
-                    })}
-                  </div>
-                </div>
-              )}
             </div>
           )}
 

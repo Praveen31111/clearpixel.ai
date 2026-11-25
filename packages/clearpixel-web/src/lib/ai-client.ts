@@ -68,21 +68,3 @@ export async function runImageUpscale(
     onProgress ? Comlink.proxy(onProgress) : undefined
   );
 }
-
-/**
- * Extracts a single person or object at normalized (0..1) image coordinates using SlimSAM.
- */
-export async function pickSubjectAtPoint(
-  imageUrl: string,
-  normX: number,
-  normY: number,
-  onProgress?: (p: ProgressPayload) => void
-): Promise<CutoutResult> {
-  const api = getWorker();
-  return api.selectSubjectAtPoint(
-    imageUrl,
-    normX,
-    normY,
-    onProgress ? Comlink.proxy(onProgress) : undefined
-  );
-}
