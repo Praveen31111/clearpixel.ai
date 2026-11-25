@@ -9,14 +9,11 @@ import { detectHardware, HardwareCapabilities } from '../lib/hardware-detect';
 import { runStudioMatting } from '../lib/wasm-bridge';
 import type { SubjectMode } from '../lib/edge-refiner';
 
-// Configure browser-only caching, self-hosted fallback, and CDN WASM runtime
+// Configure browser-only caching and self-hosted fallback
+// (Leave wasmPaths unset so transformers.js automatically loads ort-wasm from onnxruntime-web jsDelivr CDN)
 env.allowLocalModels = true;
 env.localModelPath = '/models/';
 env.useBrowserCache = true;
-if (env.backends?.onnx?.wasm) {
-  env.backends.onnx.wasm.wasmPaths =
-    'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.3.2/dist/';
-}
 
 // Primary Fast Engine: BRIA RMBG-1.4 (CC BY-NC 4.0 for open-source/non-commercial;
 // WebGPU-native IS-Net CNN, ~44MB q8, zero 17-buffer shader limits, great for both Portraits & Products)
