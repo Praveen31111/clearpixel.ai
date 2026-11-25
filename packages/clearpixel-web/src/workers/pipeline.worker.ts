@@ -9,11 +9,27 @@ import { detectHardware, HardwareCapabilities } from '../lib/hardware-detect';
 import { runStudioMatting } from '../lib/wasm-bridge';
 import type { SubjectMode } from '../lib/edge-refiner';
 
-// Configure browser-only caching and self-hosted fallback
-// (Leave wasmPaths unset so transformers.js automatically loads ort-wasm from onnxruntime-web jsDelivr CDN)
-env.allowLocalModels = true;
-env.localModelPath = '/models/';
+// Configure browser-only caching (remote Hugging Face / CDN models)
+env.allowLocalModels = false;
 env.useBrowserCache = true;
+
+// Diagnostic wrapper so any network/CORS failure reports the exact failing URL
+const origFetch = self.fetch.bind(self);
+self.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+  try {
+    return await origFetch(input, init);
+  } catch (err) {
+    const url =
+      typeof input === 'string'
+        ? input
+        : input instanceof Request
+        ? input.url
+        : String(input);
+    throw new Error(
+      `Failed to fetch (${url.slice(0, 90)}): ${err instanceof Error ? err.message : String(err)}`
+    );
+  }
+};
 
 // Primary Fast Engine: BRIA RMBG-1.4 (CC BY-NC 4.0 for open-source/non-commercial;
 // WebGPU-native IS-Net CNN, ~44MB q8, zero 17-buffer shader limits, great for both Portraits & Products)
