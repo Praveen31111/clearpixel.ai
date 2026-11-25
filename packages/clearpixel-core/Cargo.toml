@@ -1,0 +1,19 @@
+[package]
+name = "clearpixel-core"
+version = "0.1.0"
+edition = "2021"
+description = "High-performance Rust + WASM image matting, fast O(N) guided filter, and color decontamination core for ClearPixel.ai"
+license = "MIT"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+wasm-bindgen = "0.2"
+png = "0.17"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

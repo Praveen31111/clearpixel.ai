@@ -1,0 +1,9 @@
+{
+  "name": "clearpixel-monorepo",
+  "private": true,
+  "scripts": {
+    "dev": "npm --prefix packages/clearpixel-web run dev",
+    "build": "npm --prefix packages/clearpixel-web run build",
+    "lint": "npm --prefix packages/clearpixel-web run lint"
+  }
+}
