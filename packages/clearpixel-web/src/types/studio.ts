@@ -10,6 +10,15 @@ export type ExportFormat = 'png' | 'webp' | 'jpeg';
 
 export type LeftRailTab = 'canvas' | 'background' | 'refine' | 'settings';
 
+export interface StudioLayer {
+  id: string;
+  name: string;
+  visible: boolean;
+  cutoutUrl: string;
+  offsetX: number;
+  offsetY: number;
+}
+
 export interface StudioImage {
   id: string;
   name: string;
@@ -19,6 +28,7 @@ export interface StudioImage {
   height: number;
   latencyMs: number;
   backendLabel?: string;
+  layers?: StudioLayer[];
 }
 
 export interface ProcessingState {

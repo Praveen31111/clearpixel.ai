@@ -5,11 +5,18 @@ import { LandingView } from '@/components/LandingView';
 import { StudioWorkspace } from '@/components/StudioWorkspace';
 import { buildSampleStudioImage, SampleItem } from '@/lib/sample-generator';
 import {
+  pickSubjectAtPoint,
   preloadAiEngine,
   runBackgroundRemoval,
   runImageUpscale,
 } from '@/lib/ai-client';
-import { AppTool, ProcessingState, StudioImage, UpscaleScale } from '@/types/studio';
+import {
+  AppTool,
+  ProcessingState,
+  StudioImage,
+  StudioLayer,
+  UpscaleScale,
+} from '@/types/studio';
 import type { SubjectMode } from '@/lib/edge-refiner';
 
 export default function HomePage() {
@@ -61,6 +68,26 @@ export default function HomePage() {
         });
 
         const cutoutUrl = URL.createObjectURL(result.cutoutBlob);
+        const layers: StudioLayer[] = result.layers?.length
+          ? result.layers.map((l, idx) => ({
+              id: `layer-${Date.now()}-${idx}`,
+              name: l.name,
+              visible: true,
+              cutoutUrl: URL.createObjectURL(l.blob),
+              offsetX: 0,
+              offsetY: 0,
+            }))
+          : [
+              {
+                id: `layer-${Date.now()}-0`,
+                name: 'Subject 1',
+                visible: true,
+                cutoutUrl,
+                offsetX: 0,
+                offsetY: 0,
+              },
+            ];
+
         setActiveImage((prev) =>
           prev && prev.id === id
             ? {
@@ -70,6 +97,7 @@ export default function HomePage() {
                 height: result.height,
                 latencyMs: result.latencyMs,
                 backendLabel: result.backendLabel,
+                layers,
               }
             : prev
         );
@@ -117,6 +145,16 @@ export default function HomePage() {
               height: result.height,
               latencyMs: result.latencyMs,
               backendLabel: result.backendLabel,
+              layers: [
+                {
+                  id: `layer-${Date.now()}-up`,
+                  name: `Upscaled ${scale}×`,
+                  visible: true,
+                  cutoutUrl: upscaledUrl,
+                  offsetX: 0,
+                  offsetY: 0,
+                },
+              ],
             }
           : prev
       );
@@ -130,6 +168,55 @@ export default function HomePage() {
       });
     }
   }, []);
+
+  const handlePickSubject = useCallback(
+    async (normX: number, normY: number): Promise<StudioLayer | null> => {
+      if (!activeImage) return null;
+      setProcessing({
+        isProcessing: true,
+        progress: 15,
+        message: 'Selecting subject…',
+        error: null,
+      });
+
+      try {
+        const result = await pickSubjectAtPoint(
+          activeImage.originalUrl,
+          normX,
+          normY,
+          (p) => {
+            setProcessing({
+              isProcessing: true,
+              progress: p.progress,
+              message: p.message,
+              error: null,
+            });
+          }
+        );
+        const layerUrl = URL.createObjectURL(result.cutoutBlob);
+        const nextNum = (activeImage.layers?.length ?? 1) + 1;
+        const newLayer: StudioLayer = {
+          id: `layer-${Date.now()}-${nextNum}`,
+          name: `Subject ${nextNum}`,
+          visible: true,
+          cutoutUrl: layerUrl,
+          offsetX: 0,
+          offsetY: 0,
+        };
+        setProcessing({ isProcessing: false, progress: 100, message: 'Done', error: null });
+        return newLayer;
+      } catch (err) {
+        setProcessing({
+          isProcessing: false,
+          progress: 0,
+          message: '',
+          error: err instanceof Error ? err.message : 'Could not select subject.',
+        });
+        return null;
+      }
+    },
+    [activeImage]
+  );
 
   const handleFileSelected = useCallback(
     (file: File) => {
@@ -165,6 +252,16 @@ export default function HomePage() {
     setActiveImage({
       ...sample,
       backendLabel: 'On-Device Studio',
+      layers: [
+        {
+          id: `layer-${Date.now()}-sample`,
+          name: preset.label,
+          visible: true,
+          cutoutUrl: sample.cutoutUrl,
+          offsetX: 0,
+          offsetY: 0,
+        },
+      ],
     });
     setProcessing({ isProcessing: false, progress: 100, message: '', error: null });
   }, []);
@@ -192,6 +289,7 @@ export default function HomePage() {
           setUpscaleScale(2);
           runUpscale(activeImage.id, activeImage.cutoutUrl, 2);
         }}
+        onPickSubjectAtPoint={handlePickSubject}
         onToggleDark={() => setDarkMode((d) => !d)}
         onReprocessUltra={() =>
           runCutout(activeImage.id, activeImage.originalUrl, 'ultra', subjectMode)
