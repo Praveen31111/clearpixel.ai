@@ -4,12 +4,18 @@ import React, { useState, useEffect, useCallback } from 'react';
 import { LandingView } from '@/components/LandingView';
 import { StudioWorkspace } from '@/components/StudioWorkspace';
 import { buildSampleStudioImage, SampleItem } from '@/lib/sample-generator';
-import { preloadAiEngine, runBackgroundRemoval } from '@/lib/ai-client';
-import { ProcessingState, StudioImage } from '@/types/studio';
+import {
+  preloadAiEngine,
+  runBackgroundRemoval,
+  runImageUpscale,
+} from '@/lib/ai-client';
+import { AppTool, ProcessingState, StudioImage, UpscaleScale } from '@/types/studio';
 import type { SubjectMode } from '@/lib/edge-refiner';
 
 export default function HomePage() {
   const [darkMode, setDarkMode] = useState(false);
+  const [appTool, setAppTool] = useState<AppTool>('remove-bg');
+  const [upscaleScale, setUpscaleScale] = useState<UpscaleScale>(2);
   const [subjectMode, setSubjectMode] = useState<SubjectMode>('portrait');
   const [activeImage, setActiveImage] = useState<StudioImage | null>(null);
   const [processing, setProcessing] = useState<ProcessingState>({
@@ -28,12 +34,9 @@ export default function HomePage() {
     }
   }, [darkMode]);
 
-  // Silent background pre-fetch for millisecond WebGPU Portrait Matting
   useEffect(() => {
     const timer = setTimeout(() => {
-      preloadAiEngine('fast', 'portrait').catch(() => {
-        // Silent pre-fetch failure is harmless; will retry on upload
-      });
+      preloadAiEngine('fast', 'portrait').catch(() => {});
     }, 400);
     return () => clearTimeout(timer);
   }, []);
@@ -70,12 +73,7 @@ export default function HomePage() {
               }
             : prev
         );
-        setProcessing({
-          isProcessing: false,
-          progress: 100,
-          message: 'Done',
-          error: null,
-        });
+        setProcessing({ isProcessing: false, progress: 100, message: 'Done', error: null });
       } catch (err) {
         setProcessing({
           isProcessing: false,
@@ -90,6 +88,48 @@ export default function HomePage() {
     },
     []
   );
+
+  const runUpscale = useCallback(async (id: string, url: string, scale: UpscaleScale) => {
+    setProcessing({
+      isProcessing: true,
+      progress: 10,
+      message: `Upscaling image (${scale}×)…`,
+      error: null,
+    });
+
+    try {
+      const result = await runImageUpscale(url, scale, (p) => {
+        setProcessing({
+          isProcessing: true,
+          progress: p.progress,
+          message: p.message,
+          error: null,
+        });
+      });
+
+      const upscaledUrl = URL.createObjectURL(result.cutoutBlob);
+      setActiveImage((prev) =>
+        prev && prev.id === id
+          ? {
+              ...prev,
+              cutoutUrl: upscaledUrl,
+              width: result.width,
+              height: result.height,
+              latencyMs: result.latencyMs,
+              backendLabel: result.backendLabel,
+            }
+          : prev
+      );
+      setProcessing({ isProcessing: false, progress: 100, message: 'Done', error: null });
+    } catch (err) {
+      setProcessing({
+        isProcessing: false,
+        progress: 0,
+        message: '',
+        error: err instanceof Error ? err.message : 'Failed to upscale image in this browser.',
+      });
+    }
+  }, []);
 
   const handleFileSelected = useCallback(
     (file: File) => {
@@ -107,11 +147,15 @@ export default function HomePage() {
           latencyMs: 0,
           backendLabel: 'On-Device Studio',
         });
-        runCutout(id, url, 'fast', subjectMode);
+        if (appTool === 'upscale') {
+          runUpscale(id, url, upscaleScale);
+        } else {
+          runCutout(id, url, 'fast', subjectMode);
+        }
       };
       img.src = url;
     },
-    [runCutout, subjectMode]
+    [appTool, upscaleScale, runCutout, runUpscale, subjectMode]
   );
 
   const handleSampleSelected = useCallback(async (preset: SampleItem) => {
@@ -120,14 +164,9 @@ export default function HomePage() {
     const sample = await buildSampleStudioImage(preset);
     setActiveImage({
       ...sample,
-      backendLabel: 'WebGPU Accelerated',
+      backendLabel: 'On-Device Studio',
     });
-    setProcessing({
-      isProcessing: false,
-      progress: 100,
-      message: '',
-      error: null,
-    });
+    setProcessing({ isProcessing: false, progress: 100, message: '', error: null });
   }, []);
 
   if (activeImage) {
@@ -136,10 +175,22 @@ export default function HomePage() {
         image={activeImage}
         processing={processing}
         darkMode={darkMode}
+        appTool={appTool}
+        upscaleScale={upscaleScale}
         subjectMode={subjectMode}
         onChangeSubjectMode={(nextMode) => {
           setSubjectMode(nextMode);
           runCutout(activeImage.id, activeImage.originalUrl, 'fast', nextMode);
+        }}
+        onChangeUpscaleScale={(nextScale) => {
+          setUpscaleScale(nextScale);
+          setAppTool('upscale');
+          runUpscale(activeImage.id, activeImage.originalUrl, nextScale);
+        }}
+        onUpscaleCutout={() => {
+          setAppTool('upscale');
+          setUpscaleScale(2);
+          runUpscale(activeImage.id, activeImage.cutoutUrl, 2);
         }}
         onToggleDark={() => setDarkMode((d) => !d)}
         onReprocessUltra={() =>
@@ -156,6 +207,8 @@ export default function HomePage() {
   return (
     <LandingView
       darkMode={darkMode}
+      appTool={appTool}
+      onChangeTool={setAppTool}
       onToggleDark={() => setDarkMode((d) => !d)}
       onFileSelected={handleFileSelected}
       onSampleSelected={handleSampleSelected}

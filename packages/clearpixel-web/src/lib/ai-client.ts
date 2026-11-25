@@ -6,6 +6,7 @@ import type {
   QualityMode,
 } from '@/workers/pipeline.worker';
 import type { SubjectMode } from '@/lib/edge-refiner';
+import type { UpscaleScale } from '@/types/studio';
 
 let workerInstance: Worker | null = null;
 let workerProxy: Comlink.Remote<PipelineWorkerApi> | null = null;
@@ -48,6 +49,22 @@ export async function runBackgroundRemoval(
     imageUrl,
     quality,
     subject,
+    onProgress ? Comlink.proxy(onProgress) : undefined
+  );
+}
+
+/**
+ * Runs 100% on-device Tiled AI Super-Resolution (2x / 4x) inside the Web Worker.
+ */
+export async function runImageUpscale(
+  imageUrl: string,
+  scale: UpscaleScale = 2,
+  onProgress?: (p: ProgressPayload) => void
+): Promise<CutoutResult> {
+  const api = getWorker();
+  return api.upscaleImage(
+    imageUrl,
+    scale,
     onProgress ? Comlink.proxy(onProgress) : undefined
   );
 }

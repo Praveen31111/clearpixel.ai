@@ -25,10 +25,12 @@ import {
   ZoomOut,
   User,
   Package,
+  Sparkles,
 } from 'lucide-react';
 import { Logo } from './Logo';
 import type { SubjectMode } from '@/lib/edge-refiner';
 import {
+  AppTool,
   BackgroundMode,
   BackgroundSettings,
   ExportFormat,
@@ -36,14 +38,19 @@ import {
   ProcessingState,
   RefineSettings,
   StudioImage,
+  UpscaleScale,
 } from '@/types/studio';
 
 interface StudioWorkspaceProps {
   image: StudioImage;
   processing: ProcessingState;
   darkMode: boolean;
+  appTool: AppTool;
+  upscaleScale: UpscaleScale;
   subjectMode: SubjectMode;
   onChangeSubjectMode: (mode: SubjectMode) => void;
+  onChangeUpscaleScale: (scale: UpscaleScale) => void;
+  onUpscaleCutout: () => void;
   onToggleDark: () => void;
   onReprocessUltra?: () => void;
   onReset: () => void;
@@ -61,8 +68,12 @@ export function StudioWorkspace({
   image,
   processing,
   darkMode,
+  appTool,
+  upscaleScale,
   subjectMode,
   onChangeSubjectMode,
+  onChangeUpscaleScale,
+  onUpscaleCutout,
   onToggleDark,
   onReprocessUltra,
   onReset,
@@ -100,12 +111,14 @@ export function StudioWorkspace({
     feather: 5,
   });
   const [defringe, setDefringe] = useState(0);
+  const [clarity, setClarity] = useState(0);
 
   const stageRef = useRef<HTMLDivElement>(null);
   const mainRef = useRef<HTMLElement>(null);
   const cutoutCanvasRef = useRef<HTMLCanvasElement>(null);
   const baseCutoutDataRef = useRef<ImageData | null>(null);
   const defringeRafRef = useRef<number | null>(null);
+  const clarityRafRef = useRef<number | null>(null);
   const originalImgRef = useRef<HTMLImageElement | null>(null);
   const historyRef = useRef<ImageData[]>([]);
   const historyIdxRef = useRef(-1);
@@ -131,6 +144,7 @@ export function StudioWorkspace({
         const initial = ctx.getImageData(0, 0, canvas.width, canvas.height);
         baseCutoutDataRef.current = initial;
         setDefringe(0);
+        setClarity(0);
         historyRef.current = [initial];
         historyIdxRef.current = 0;
         setHistoryState({ index: 0, length: 1 });
@@ -178,6 +192,56 @@ export function StudioWorkspace({
         dst[i + 1] = src[i + 1];
         dst[i + 2] = src[i + 2];
         dst[i + 3] = newA;
+      }
+
+      ctx.putImageData(next, 0, 0);
+    });
+  }, []);
+
+  // Real-time 60fps Micro-Detail Clarity (3x3 unsharp mask) for Upscaler mode
+  const handleClarityChange = useCallback((level: number) => {
+    setClarity(level);
+    if (clarityRafRef.current) cancelAnimationFrame(clarityRafRef.current);
+    clarityRafRef.current = requestAnimationFrame(() => {
+      const base = baseCutoutDataRef.current;
+      const canvas = cutoutCanvasRef.current;
+      const ctx = canvas?.getContext('2d', { willReadFrequently: true });
+      if (!base || !canvas || !ctx) return;
+
+      if (level === 0) {
+        ctx.putImageData(base, 0, 0);
+        return;
+      }
+
+      const w = base.width;
+      const h = base.height;
+      const src = base.data;
+      const next = new ImageData(w, h);
+      const dst = next.data;
+      const amount = (level / 100) * 1.1;
+
+      for (let y = 0; y < h; y++) {
+        const y0 = y > 0 ? y - 1 : 0;
+        const y1 = y < h - 1 ? y + 1 : h - 1;
+        for (let x = 0; x < w; x++) {
+          const idx = (y * w + x) * 4;
+          const a = src[idx + 3];
+          if (a === 0) continue;
+
+          const x0 = x > 0 ? x - 1 : 0;
+          const x1 = x < w - 1 ? x + 1 : w - 1;
+          const up = (y0 * w + x) * 4;
+          const dn = (y1 * w + x) * 4;
+          const lt = (y * w + x0) * 4;
+          const rt = (y * w + x1) * 4;
+
+          for (let c = 0; c < 3; c++) {
+            const blur = (src[up + c] + src[dn + c] + src[lt + c] + src[rt + c]) * 0.25;
+            const sharp = src[idx + c] + (src[idx + c] - blur) * amount;
+            dst[idx + c] = Math.max(0, Math.min(255, Math.round(sharp)));
+          }
+          dst[idx + 3] = a;
+        }
       }
 
       ctx.putImageData(next, 0, 0);
@@ -489,46 +553,80 @@ export function StudioWorkspace({
             {darkMode ? <Sun className="w-4 h-4" /> : <Moon className="w-4 h-4" />}
           </button>
 
-          {/* Subject Mode Switcher: Portrait (Hair) vs Product (Sharp) */}
-          <div className="hidden lg:inline-flex items-center p-0.5 rounded-lg bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
-            <button
-              type="button"
-              disabled={processing.isProcessing}
-              onClick={() => onChangeSubjectMode('portrait')}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
-                subjectMode === 'portrait'
-                  ? 'bg-white dark:bg-zinc-800 text-zinc-950 dark:text-white shadow-xs'
-                  : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
-              }`}
-            >
-              <User className="w-3.5 h-3.5" />
-              <span>Portrait</span>
-            </button>
-            <button
-              type="button"
-              disabled={processing.isProcessing}
-              onClick={() => onChangeSubjectMode('product')}
-              className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
-                subjectMode === 'product'
-                  ? 'bg-white dark:bg-zinc-800 text-zinc-950 dark:text-white shadow-xs'
-                  : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
-              }`}
-            >
-              <Package className="w-3.5 h-3.5" />
-              <span>Product</span>
-            </button>
-          </div>
+          {appTool === 'remove-bg' && (
+            <>
+              {/* Subject Mode Switcher: Portrait (Hair) vs Product (Sharp) */}
+              <div className="hidden lg:inline-flex items-center p-0.5 rounded-lg bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
+                <button
+                  type="button"
+                  disabled={processing.isProcessing}
+                  onClick={() => onChangeSubjectMode('portrait')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                    subjectMode === 'portrait'
+                      ? 'bg-white dark:bg-zinc-800 text-zinc-950 dark:text-white shadow-xs'
+                      : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+                  }`}
+                >
+                  <User className="w-3.5 h-3.5" />
+                  <span>Portrait</span>
+                </button>
+                <button
+                  type="button"
+                  disabled={processing.isProcessing}
+                  onClick={() => onChangeSubjectMode('product')}
+                  className={`inline-flex items-center gap-1 px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                    subjectMode === 'product'
+                      ? 'bg-white dark:bg-zinc-800 text-zinc-950 dark:text-white shadow-xs'
+                      : 'text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200'
+                  }`}
+                >
+                  <Package className="w-3.5 h-3.5" />
+                  <span>Product</span>
+                </button>
+              </div>
 
-          {onReprocessUltra && !image.backendLabel?.includes('1024px') && (
-            <button
-              onClick={onReprocessUltra}
-              disabled={processing.isProcessing}
-              title="Re-run with 1024px Ultra HD model for complex hair/backgrounds"
-              className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800/70 bg-blue-50/70 dark:bg-blue-950/40 text-xs font-semibold text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:opacity-50 transition-colors"
-            >
-              <Zap className="w-3.5 h-3.5" />
-              <span>Ultra HD</span>
-            </button>
+              {onReprocessUltra && !image.backendLabel?.includes('1024px') && (
+                <button
+                  onClick={onReprocessUltra}
+                  disabled={processing.isProcessing}
+                  title="Enhance ultra-fine hair & complex background details"
+                  className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-blue-200 dark:border-blue-800/70 bg-blue-50/70 dark:bg-blue-950/40 text-xs font-semibold text-blue-700 dark:text-blue-300 hover:bg-blue-100 dark:hover:bg-blue-900/50 disabled:opacity-50 transition-colors"
+                >
+                  <Zap className="w-3.5 h-3.5" />
+                  <span>Ultra HD</span>
+                </button>
+              )}
+
+              <button
+                onClick={onUpscaleCutout}
+                disabled={processing.isProcessing}
+                title="Upscale transparent cutout 2×"
+                className="hidden sm:inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg border border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-900 text-xs font-semibold text-zinc-800 dark:text-zinc-200 hover:bg-zinc-50 dark:hover:bg-zinc-800 disabled:opacity-50 transition-colors"
+              >
+                <Sparkles className="w-3.5 h-3.5 text-blue-600" />
+                <span>Upscale 2×</span>
+              </button>
+            </>
+          )}
+
+          {appTool === 'upscale' && (
+            <div className="inline-flex items-center p-0.5 rounded-lg bg-zinc-100 dark:bg-zinc-900 border border-zinc-200 dark:border-zinc-800">
+              {([2, 4] as UpscaleScale[]).map((s) => (
+                <button
+                  key={s}
+                  type="button"
+                  disabled={processing.isProcessing}
+                  onClick={() => onChangeUpscaleScale(s)}
+                  className={`px-2.5 py-1 rounded-md text-xs font-semibold transition-colors ${
+                    upscaleScale === s
+                      ? 'bg-blue-600 text-white shadow-xs'
+                      : 'text-zinc-600 dark:text-zinc-300 hover:text-zinc-900'
+                  }`}
+                >
+                  {s}× {s === 4 ? 'Ultra' : 'HD'}
+                </button>
+              ))}
+            </div>
           )}
 
           <button
@@ -876,6 +974,56 @@ export function StudioWorkspace({
 
         {/* Desktop Right Inspector Panel (280px fixed) */}
         <aside className="hidden md:flex w-[280px] shrink-0 flex-col border-l border-zinc-200 dark:border-zinc-800 bg-white dark:bg-zinc-950 overflow-y-auto">
+          {appTool === 'upscale' && (
+            <div className="border-b border-zinc-200 dark:border-zinc-800 p-4 space-y-4">
+              <div className="flex items-center justify-between">
+                <span className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                  AI Upscale
+                </span>
+                <span className="text-[11px] font-mono text-blue-600 dark:text-blue-400">
+                  {upscaleScale}× Output
+                </span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                {([2, 4] as UpscaleScale[]).map((s) => (
+                  <button
+                    key={s}
+                    type="button"
+                    disabled={processing.isProcessing}
+                    onClick={() => onChangeUpscaleScale(s)}
+                    className={`py-2 px-3 rounded-lg text-xs font-semibold border transition-colors ${
+                      upscaleScale === s
+                        ? 'bg-blue-600 text-white border-blue-600'
+                        : 'bg-white dark:bg-zinc-900 text-zinc-700 dark:text-zinc-300 border-zinc-200 dark:border-zinc-800'
+                    }`}
+                  >
+                    {s}× {s === 4 ? 'Ultra' : 'HD'}
+                  </button>
+                ))}
+              </div>
+
+              <div className="space-y-1.5 pt-1">
+                <div className="flex items-center justify-between text-xs">
+                  <span className="text-zinc-600 dark:text-zinc-400 font-medium">
+                    Detail Clarity
+                  </span>
+                  <span className="font-mono text-zinc-700 dark:text-zinc-300 bg-zinc-100 dark:bg-zinc-900 px-1.5 py-0.5 rounded">
+                    {clarity}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min={0}
+                  max={100}
+                  value={clarity}
+                  onChange={(e) => handleClarityChange(Number(e.target.value))}
+                  className="w-full studio-slider"
+                />
+              </div>
+            </div>
+          )}
+
           {/* Background Section */}
           <div className="border-b border-zinc-200 dark:border-zinc-800 p-4">
             <button

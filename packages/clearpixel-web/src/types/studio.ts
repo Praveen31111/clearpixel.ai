@@ -1,3 +1,7 @@
+export type AppTool = 'remove-bg' | 'upscale';
+
+export type UpscaleScale = 2 | 4;
+
 export type BackgroundMode = 'transparent' | 'solid' | 'gradient' | 'photo';
 
 export type BrushTool = 'keep' | 'erase';

@@ -1,13 +1,16 @@
 'use client';
 
 import React, { useRef, useState, useEffect } from 'react';
-import { UploadCloud, ShieldCheck, Sun, Moon } from 'lucide-react';
+import { UploadCloud, ShieldCheck, Sun, Moon, Sparkles, Scissors } from 'lucide-react';
 import { Logo } from './Logo';
 import { SAMPLE_PRESETS, SampleItem } from '@/lib/sample-generator';
 import { getModelCacheStatus } from '@/lib/model-cache';
+import type { AppTool } from '@/types/studio';
 
 interface LandingViewProps {
   darkMode: boolean;
+  appTool: AppTool;
+  onChangeTool: (tool: AppTool) => void;
   onToggleDark: () => void;
   onFileSelected: (file: File) => void;
   onSampleSelected: (preset: SampleItem) => void;
@@ -15,6 +18,8 @@ interface LandingViewProps {
 
 export function LandingView({
   darkMode,
+  appTool,
+  onChangeTool,
   onToggleDark,
   onFileSelected,
   onSampleSelected,
@@ -68,6 +73,34 @@ export function LandingView({
           </div>
 
           <div className="flex items-center gap-3 sm:gap-4">
+            {/* Tool Switcher: Remove BG | AI Upscale */}
+            <div className="inline-flex items-center p-0.5 rounded-full bg-slate-100 dark:bg-zinc-900 border border-slate-200 dark:border-zinc-800">
+              <button
+                type="button"
+                onClick={() => onChangeTool('remove-bg')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                  appTool === 'remove-bg'
+                    ? 'bg-white dark:bg-zinc-800 text-slate-950 dark:text-white shadow-xs'
+                    : 'text-slate-500 hover:text-slate-800 dark:hover:text-zinc-200'
+                }`}
+              >
+                <Scissors className="w-3.5 h-3.5" />
+                <span>Remove BG</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => onChangeTool('upscale')}
+                className={`inline-flex items-center gap-1.5 px-3 py-1 rounded-full text-xs font-semibold transition-all ${
+                  appTool === 'upscale'
+                    ? 'bg-blue-600 text-white shadow-xs'
+                    : 'text-slate-500 hover:text-slate-800 dark:hover:text-zinc-200'
+                }`}
+              >
+                <Sparkles className="w-3.5 h-3.5" />
+                <span>AI Upscale 4×</span>
+              </button>
+            </div>
+
             {/* Segmented Sun / Moon Pill */}
             <button
               onClick={onToggleDark}
@@ -115,7 +148,7 @@ export function LandingView({
           <div className="lg:col-span-5 space-y-6">
             <div className="space-y-3.5">
               <h1 className="text-4xl sm:text-5xl xl:text-[56px] font-extrabold tracking-[-0.03em] leading-[1.06] text-[#0F172A] dark:text-white">
-                Studio cutouts.
+                {appTool === 'upscale' ? 'Studio upscaling.' : 'Studio cutouts.'}
                 <br />
                 <span className="relative inline-block text-[#1D4ED8] dark:text-blue-500">
                   Zero uploads.
@@ -136,8 +169,9 @@ export function LandingView({
                 </span>
               </h1>
               <p className="text-base sm:text-[17px] text-slate-600 dark:text-zinc-400 max-w-md leading-relaxed pt-1">
-                Full-resolution background removal in your browser.
-                <br className="hidden sm:block" /> Private, instant, free.
+                {appTool === 'upscale'
+                  ? '2× & 4× super-resolution in your browser. Crisp details, private, free.'
+                  : 'Full-resolution background removal in your browser. Private, instant, free.'}
               </p>
             </div>
 
