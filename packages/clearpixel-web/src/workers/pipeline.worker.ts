@@ -9,9 +9,15 @@ import { detectHardware, HardwareCapabilities } from '../lib/hardware-detect';
 import { runStudioMatting } from '../lib/wasm-bridge';
 import type { SubjectMode } from '../lib/edge-refiner';
 
-// Configure browser-only caching (remote Hugging Face / CDN models)
+// Configure browser-only caching and self-hosted WebGPU+WASM runtime (/public/ort/, 16MB)
 env.allowLocalModels = false;
 env.useBrowserCache = true;
+if (env.backends?.onnx?.wasm) {
+  env.backends.onnx.wasm.wasmPaths = {
+    mjs: '/ort/ort-wasm-simd-threaded.jspi.mjs',
+    wasm: '/ort/ort-wasm-simd-threaded.jspi.wasm',
+  };
+}
 
 // Diagnostic wrapper so any network/CORS failure reports the exact failing URL
 const origFetch = self.fetch.bind(self);
