@@ -112,8 +112,8 @@ async function buildEngine(
 
   onProgress?.({
     stage: 'init',
-    progress: 5,
-    message: `Initializing ${hw.label}…`,
+    progress: 10,
+    message: 'Preparing studio…',
   });
 
   const processor = await AutoProcessor.from_pretrained(modelId);
@@ -124,8 +124,8 @@ async function buildEngine(
       if (info.status === 'progress' && typeof info.progress === 'number') {
         onProgress?.({
           stage: 'downloading',
-          progress: Math.min(90, Math.round(info.progress)),
-          message: `Caching AI model (${Math.round(info.progress)}%)…`,
+          progress: Math.min(85, Math.round(info.progress)),
+          message: 'Removing background…',
         });
       }
     },
@@ -134,7 +134,7 @@ async function buildEngine(
   onProgress?.({
     stage: 'ready',
     progress: 100,
-    message: 'Engine ready',
+    message: 'Ready',
   });
 
   return { model, processor, hw, modelId };
@@ -177,7 +177,7 @@ async function runInferenceWithFallback(
     onProgress?.({
       stage: 'inferring',
       progress: 60,
-      message: `Removing background (${engine.hw.label})…`,
+      message: 'Removing background…',
     });
     const outputs = await invokeModel(engine);
     return { outputs, hw: engine.hw };
@@ -185,15 +185,15 @@ async function runInferenceWithFallback(
     if (engine.hw.device === 'webgpu') {
       onProgress?.({
         stage: 'init',
-        progress: 25,
-        message: 'Switching to WASM SIMD fallback…',
+        progress: 35,
+        message: 'Removing background…',
       });
       engine = await getEngine(true, quality, onProgress);
 
       onProgress?.({
         stage: 'inferring',
         progress: 65,
-        message: `Removing background (${engine.hw.label})…`,
+        message: 'Removing background…',
       });
       const outputs = await invokeModel(engine);
       return { outputs, hw: engine.hw };
@@ -225,11 +225,8 @@ const workerApi = {
 
     onProgress?.({
       stage: 'compositing',
-      progress: 88,
-      message:
-        subject === 'portrait'
-          ? 'Refining hair strands & removing halos…'
-          : 'Sharpening product edges…',
+      progress: 90,
+      message: 'Refining edges…',
     });
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any

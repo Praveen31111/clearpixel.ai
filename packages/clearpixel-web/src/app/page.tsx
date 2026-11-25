@@ -42,13 +42,8 @@ export default function HomePage() {
     async (id: string, url: string, quality: 'fast' | 'ultra', subject: SubjectMode) => {
       setProcessing({
         isProcessing: true,
-        progress: 8,
-        message:
-          quality === 'ultra'
-            ? 'Running 1024px Ultra HD…'
-            : subject === 'portrait'
-            ? 'Running Portrait Hair Engine…'
-            : 'Running Product Sharp Engine…',
+        progress: 10,
+        message: quality === 'ultra' ? 'Enhancing ultra-fine details…' : 'Removing background…',
         error: null,
       });
 
@@ -110,7 +105,7 @@ export default function HomePage() {
           width: img.naturalWidth,
           height: img.naturalHeight,
           latencyMs: 0,
-          backendLabel: 'Detecting Engine…',
+          backendLabel: 'On-Device Studio',
         });
         runCutout(id, url, 'fast', subjectMode);
       };

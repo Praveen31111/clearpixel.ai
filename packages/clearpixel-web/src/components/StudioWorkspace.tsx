@@ -749,14 +749,22 @@ export function StudioWorkspace({
               After
             </span>
 
-            {/* Live AI Processing Pill */}
+            {/* Live Smooth Progress Card */}
             {processing.isProcessing && (
-              <div className="absolute inset-0 z-30 bg-zinc-950/25 backdrop-blur-[2px] flex items-center justify-center pointer-events-none">
-                <div className="px-4 py-2.5 rounded-full bg-white/95 dark:bg-zinc-900/95 border border-zinc-200 dark:border-zinc-700 shadow-lg flex items-center gap-2.5">
-                  <span className="w-2.5 h-2.5 rounded-full bg-blue-600 animate-ping" />
-                  <span className="text-xs font-semibold text-zinc-900 dark:text-zinc-100">
-                    {processing.message || 'Processing…'}
-                  </span>
+              <div className="absolute inset-0 z-30 bg-zinc-950/30 backdrop-blur-[3px] flex items-center justify-center pointer-events-none px-4">
+                <div className="w-full max-w-[260px] rounded-2xl bg-white/95 dark:bg-zinc-900/95 border border-zinc-200 dark:border-zinc-700 shadow-xl p-4 space-y-2.5">
+                  <div className="flex items-center justify-between text-xs font-semibold text-zinc-900 dark:text-zinc-100">
+                    <span>{processing.message || 'Removing background…'}</span>
+                    <span className="font-mono text-blue-600 dark:text-blue-400">
+                      {Math.max(8, processing.progress)}%
+                    </span>
+                  </div>
+                  <div className="w-full h-1.5 rounded-full bg-zinc-200 dark:bg-zinc-800 overflow-hidden">
+                    <div
+                      className="h-full rounded-full bg-blue-600 transition-all duration-200 ease-out"
+                      style={{ width: `${Math.max(8, processing.progress)}%` }}
+                    />
+                  </div>
                 </div>
               </div>
             )}
@@ -1120,7 +1128,7 @@ export function StudioWorkspace({
         </div>
         <div className="flex items-center gap-1.5 font-medium">
           <Zap className="w-3.5 h-3.5 text-amber-500" />
-          <span>{image.backendLabel || 'WebGPU Accelerated'} · 60fps</span>
+          <span>On-Device Studio · Private &amp; Fast</span>
         </div>
         <div className="font-mono">
           {image.width} × {image.height}
