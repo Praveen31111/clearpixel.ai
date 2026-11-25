@@ -26,6 +26,11 @@ export const metadata: Metadata = {
   title: 'ClearPixel.ai — Studio cutouts. Zero uploads.',
   description:
     'Full-resolution background removal in your browser. Private, instant, free. Powered by WebGPU & Rust WASM.',
+  icons: {
+    icon: '/icon.svg',
+    shortcut: '/icon.svg',
+    apple: '/icon.svg',
+  },
 };
 
 export default function RootLayout({
