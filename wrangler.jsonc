@@ -1,0 +1,7 @@
+{
+  "name": "clearpixel-ai",
+  "compatibility_date": "2025-01-01",
+  "assets": {
+    "directory": "./packages/clearpixel-web/out"
+  }
+}
