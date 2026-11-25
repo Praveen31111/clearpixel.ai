@@ -1,6 +1,7 @@
 import * as Comlink from 'comlink';
 import {
   AutoModel,
+  AutoModelForImageMatting,
   AutoProcessor,
   RawImage,
   env,
@@ -49,6 +50,8 @@ const RMBG_MODEL_ID = 'briaai/RMBG-1.4';
 // Secondary Ultra HD Engine: MIT-licensed BiRefNet-Lite 1024px
 const WEBGPU_1024_MODEL_ID = 'jiabins0303/birefnet-lite-1024-webgpu';
 const ULTRA_1024_MODEL_ID = 'onnx-community/BiRefNet_lite-ONNX';
+// Neural Trimap Hair Matting Engine (27.5 MB INT8 q8, Apache-2.0 / MIT)
+const VITMATTE_MODEL_ID = 'Xenova/vitmatte-small-composition-1k';
 // Apache-2.0 Super-Resolution Upscaler models (Swin2SR)
 const UPSCALE_2X_MODEL_ID = 'Xenova/swin2SR-classical-sr-x2-64';
 const UPSCALE_4X_MODEL_ID = 'Xenova/swin2SR-realworld-sr-x4-64-bsrgan-psnr';
@@ -81,6 +84,166 @@ interface EngineInstance {
 const engineCache = new Map<string, Promise<EngineInstance>>();
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const upscalerCache = new Map<string, Promise<any>>();
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+let vitmattePromise: Promise<{ model: any; processor: any }> | null = null;
+
+async function getVitMatte(onProgress?: (p: ProgressPayload) => void) {
+  if (vitmattePromise) return vitmattePromise;
+
+  vitmattePromise = (async () => {
+    onProgress?.({
+      stage: 'downloading',
+      progress: 84,
+      message: 'Loading Studio Hair Matte…',
+    });
+    const processor = await AutoProcessor.from_pretrained(VITMATTE_MODEL_ID);
+    const model = await AutoModelForImageMatting.from_pretrained(VITMATTE_MODEL_ID, {
+      device: 'wasm',
+      dtype: 'q8',
+    });
+    return { model, processor };
+  })();
+
+  return vitmattePromise;
+}
+
+/**
+ * O(N) Separable 1D Erosion + Dilation to build an Auto-Trimap (0=bg, 128=unknown hair band, 255=fg).
+ */
+function buildAutoTrimap(
+  mask: Uint8Array,
+  w: number,
+  h: number,
+  erodeRadius: number,
+  dilateRadius: number
+): Uint8Array {
+  const n = w * h;
+  const fgTemp = new Uint8Array(n);
+  const fgEroded = new Uint8Array(n);
+  const bgTemp = new Uint8Array(n);
+  const bgDilated = new Uint8Array(n);
+
+  // Horizontal pass
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    for (let x = 0; x < w; x++) {
+      let minV = 255;
+      const ex0 = Math.max(0, x - erodeRadius);
+      const ex1 = Math.min(w - 1, x + erodeRadius);
+      for (let kx = ex0; kx <= ex1; kx++) {
+        const v = mask[row + kx];
+        if (v < minV) minV = v;
+      }
+      fgTemp[row + x] = minV;
+
+      let maxV = 0;
+      const dx0 = Math.max(0, x - dilateRadius);
+      const dx1 = Math.min(w - 1, x + dilateRadius);
+      for (let kx = dx0; kx <= dx1; kx++) {
+        const v = mask[row + kx];
+        if (v > maxV) maxV = v;
+      }
+      bgTemp[row + x] = maxV;
+    }
+  }
+
+  // Vertical pass
+  for (let y = 0; y < h; y++) {
+    const row = y * w;
+    const ey0 = Math.max(0, y - erodeRadius);
+    const ey1 = Math.min(h - 1, y + erodeRadius);
+    const dy0 = Math.max(0, y - dilateRadius);
+    const dy1 = Math.min(h - 1, y + dilateRadius);
+
+    for (let x = 0; x < w; x++) {
+      let minV = 255;
+      for (let ky = ey0; ky <= ey1; ky++) {
+        const v = fgTemp[ky * w + x];
+        if (v < minV) minV = v;
+      }
+      fgEroded[row + x] = minV;
+
+      let maxV = 0;
+      for (let ky = dy0; ky <= dy1; ky++) {
+        const v = bgTemp[ky * w + x];
+        if (v > maxV) maxV = v;
+      }
+      bgDilated[row + x] = maxV;
+    }
+  }
+
+  const trimap = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    if (fgEroded[i] >= 235) {
+      trimap[i] = 255;
+    } else if (bgDilated[i] <= 18) {
+      trimap[i] = 0;
+    } else {
+      trimap[i] = 128;
+    }
+  }
+  return trimap;
+}
+
+async function refinePortraitWithVitMatte(
+  image: RawImage,
+  coarseMask: Uint8Array,
+  onProgress?: (p: ProgressPayload) => void
+): Promise<Uint8Array> {
+  const { model, processor } = await getVitMatte(onProgress);
+
+  onProgress?.({
+    stage: 'compositing',
+    progress: 89,
+    message: 'Refining fine hair strands…',
+  });
+
+  // Cap ViTMatte input to <= 768px (divisible by 32) so mobile & laptop stay fast and within RAM limits
+  const maxDim = 768;
+  const scale = Math.min(1, maxDim / Math.max(image.width, image.height));
+  const matW = Math.max(32, Math.round((image.width * scale) / 32) * 32);
+  const matH = Math.max(32, Math.round((image.height * scale) / 32) * 32);
+
+  const smallImg = await image.rgb().resize(matW, matH);
+  const smallMaskImg = await new RawImage(coarseMask, image.width, image.height, 1).resize(
+    matW,
+    matH
+  );
+  const smallMask = smallMaskImg.data as unknown as Uint8Array;
+  const trimapBytes = buildAutoTrimap(smallMask, matW, matH, 5, 14);
+  const trimapImg = new RawImage(trimapBytes, matW, matH, 1);
+
+  const inputs = await processor(smallImg, trimapImg);
+  const { alphas } = await model(inputs);
+  const alphaData = alphas.data as Float32Array;
+
+  const matteSmallBytes = new Uint8Array(matW * matH);
+  for (let i = 0; i < matteSmallBytes.length; i++) {
+    matteSmallBytes[i] = Math.max(0, Math.min(255, Math.round(alphaData[i] * 255)));
+  }
+
+  const matteResized = await new RawImage(matteSmallBytes, matW, matH, 1).resize(
+    image.width,
+    image.height
+  );
+  const fullTrimapResized = await trimapImg.resize(image.width, image.height);
+  const matteFull = matteResized.data as unknown as Uint8Array;
+  const trimapFull = fullTrimapResized.data as unknown as Uint8Array;
+
+  // Merge ViTMatte predictions inside the unknown trimap band while preserving solid core & far bg
+  const merged = new Uint8Array(coarseMask.length);
+  for (let i = 0; i < merged.length; i++) {
+    const t = trimapFull[i];
+    if (t >= 230) {
+      merged[i] = Math.max(coarseMask[i], matteFull[i]);
+    } else if (t <= 25) {
+      merged[i] = Math.min(coarseMask[i], matteFull[i]);
+    } else {
+      merged[i] = matteFull[i];
+    }
+  }
+  return merged;
+}
 
 async function getUpscaler(scale: UpscaleScale, onProgress?: (p: ProgressPayload) => void) {
   const key = `upscale-${scale}`;
@@ -381,9 +544,20 @@ const workerApi = {
       }
     }
 
+    let effectiveMask = finalMask;
+    let vitmatteUsed = false;
+    if (quality === 'ultra' && subject === 'portrait') {
+      try {
+        effectiveMask = await refinePortraitWithVitMatte(image, finalMask, onProgress);
+        vitmatteUsed = true;
+      } catch (err) {
+        console.warn('ViTMatte hair refinement skipped, falling back to Guided Filter:', err);
+      }
+    }
+
     onProgress?.({
       stage: 'compositing',
-      progress: 92,
+      progress: 93,
       message: 'Refining edges…',
     });
 
@@ -394,7 +568,7 @@ const workerApi = {
     const rgbaImage = image.rgba();
     const matting = await runStudioMatting(
       rgbaImage.data as unknown as Uint8ClampedArray,
-      finalMask,
+      effectiveMask,
       image.width,
       image.height,
       subject
@@ -414,7 +588,9 @@ const workerApi = {
     }
 
     const latencyMs = Math.round(performance.now() - start);
-    const engineSuffix = matting.usedRustWasm ? ' + Rust WASM' : '';
+    const engineSuffix = `${vitmatteUsed ? ' + ViTMatte' : ''}${
+      matting.usedRustWasm ? ' + Rust WASM' : ''
+    }`;
 
     onProgress?.({
       stage: 'ready',

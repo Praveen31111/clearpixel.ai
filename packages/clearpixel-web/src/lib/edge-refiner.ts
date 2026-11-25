@@ -171,7 +171,7 @@ export function refineCutoutEdges(
 
   const globalBg = estimateGlobalBackground(rgba, alphaMask, totalPixels);
 
-  const lowCut = subject === 'portrait' ? 10 : 22;
+  const lowCut = subject === 'portrait' ? 2 : 22;
   const highCut = subject === 'portrait' ? 232 : 225;
   const span = highCut - lowCut;
 
@@ -328,7 +328,7 @@ export function refineCutoutEdges(
           const p4 = idx * 4;
           let a = guidedAlpha[idx];
 
-          if (a <= 5) continue;
+          if (a <= 2) continue;
 
           // Zero-Quality-Loss Guarantee: never alter RGB on confident foreground (faces, skin, suits)
           if (a >= 225) {
@@ -343,14 +343,14 @@ export function refineCutoutEdges(
           const g0 = rgba[p4 + 1];
           const b0 = rgba[p4 + 2];
 
-          // Suppress muddy empty border pixels matching dark local background luminance
-          if (subject === 'portrait' && isDarkLocalBg && a < 40) {
-            const pxLuma = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0;
-            if (Math.abs(pxLuma - localBg.luma) < 15) {
-              a = Math.round(a * 0.35);
-            }
+          const distBgQuick =
+            Math.abs(r0 - localBg.r) + Math.abs(g0 - localBg.g) + Math.abs(b0 - localBg.b);
+
+          // Suppress muddy empty border pixels ONLY when they actually match dark local background
+          if (subject === 'portrait' && isDarkLocalBg && a < 40 && distBgQuick < 36) {
+            a = Math.round(a * 0.35);
           }
-          if (isWhiteLocalBg && a < 22) {
+          if (isWhiteLocalBg && a < 22 && distBgQuick < 36) {
             a = Math.max(0, a - 6);
           }
           if (a <= 2) continue;
@@ -395,23 +395,46 @@ export function refineCutoutEdges(
             const cleanG = fgG / fgWeightSum;
             const cleanB = fgB / fgWeightSum;
 
-            // Light-Wrap / Specular Spill Guard: if semi-transparent pixel is closer to localBg than cleanFg,
-            // shift weight heavily toward clean foreground pigment to eliminate colored/white glow
+            // Light-Wrap / Specular Spill Guard:
+            // 1) Color wrap: semi-transparent pixel is closer to localBg than cleanFg
+            // 2) Backlit Rim-Light Glare: edge pixel is brighter than BOTH solid hair (cleanFg) AND localBg
+            //    (common in sunset/window backlit hair where unmixing blows up to pure white 255)
             const distBg =
               Math.abs(r0 - localBg.r) + Math.abs(g0 - localBg.g) + Math.abs(b0 - localBg.b);
             const distFg =
               Math.abs(r0 - cleanR) + Math.abs(g0 - cleanG) + Math.abs(b0 - cleanB);
+            const pxLuma = 0.2126 * r0 + 0.7152 * g0 + 0.0722 * b0;
+            const fgLuma = 0.2126 * cleanR + 0.7152 * cleanG + 0.0722 * cleanB;
+            const isBacklitGlare =
+              subject === 'portrait' && pxLuma > Math.max(fgLuma, localBg.luma) + 28;
             const isLightWrap = a < 155 && distBg < distFg * 0.85;
 
-            const fgMix = isLightWrap ? 0.65 : 0.38;
-            const targetR = unmixR * (1 - fgMix) + cleanR * fgMix;
-            const targetG = unmixG * (1 - fgMix) + cleanG * fgMix;
-            const targetB = unmixB * (1 - fgMix) + cleanB * fgMix;
-            const blend = Math.min(isLightWrap ? 0.94 : 0.88, (255 - a) * 0.0039215686);
+            // Fine Hair Strand Alpha Boost: if a faint edge pixel (a < 130) has strong contrast
+            // against local background and matches nearby hair/foreground pigment, preserve the wisp
+            if (subject === 'portrait' && a < 130 && distBg > 48 && distFg < distBg * 1.15) {
+              const recovered = Math.min(205, Math.round(distBg * 1.45));
+              if (recovered > a) {
+                a = recovered;
+              }
+            }
 
-            out[p4] = Math.round(r0 * (1 - blend) + targetR * blend);
-            out[p4 + 1] = Math.round(g0 * (1 - blend) + targetG * blend);
-            out[p4 + 2] = Math.round(b0 * (1 - blend) + targetB * blend);
+            if (isBacklitGlare) {
+              // Replace bright rim-light glare directly with natural inner hair pigment
+              const glareBlend = Math.min(0.95, 0.55 + (255 - a) * 0.002);
+              out[p4] = Math.round(r0 * (1 - glareBlend) + cleanR * glareBlend);
+              out[p4 + 1] = Math.round(g0 * (1 - glareBlend) + cleanG * glareBlend);
+              out[p4 + 2] = Math.round(b0 * (1 - glareBlend) + cleanB * glareBlend);
+            } else {
+              const fgMix = isLightWrap ? 0.65 : 0.38;
+              const targetR = unmixR * (1 - fgMix) + cleanR * fgMix;
+              const targetG = unmixG * (1 - fgMix) + cleanG * fgMix;
+              const targetB = unmixB * (1 - fgMix) + cleanB * fgMix;
+              const blend = Math.min(isLightWrap ? 0.94 : 0.88, (255 - a) * 0.0039215686);
+
+              out[p4] = Math.round(r0 * (1 - blend) + targetR * blend);
+              out[p4 + 1] = Math.round(g0 * (1 - blend) + targetG * blend);
+              out[p4 + 2] = Math.round(b0 * (1 - blend) + targetB * blend);
+            }
           } else {
             out[p4] = Math.round(unmixR);
             out[p4 + 1] = Math.round(unmixG);
