@@ -101,6 +101,10 @@ async function getUpscaler(scale: UpscaleScale, onProgress?: (p: ProgressPayload
       pipeline('image-to-image', modelId, {
         device,
         dtype,
+        session_options: {
+          enableMemPattern: false,
+          enableCpuMemArena: false,
+        },
         progress_callback: (info: { status?: string; progress?: number }) => {
           if (info.status === 'progress' && typeof info.progress === 'number') {
             onProgress?.({
@@ -372,8 +376,8 @@ const workerApi = {
       }
     }
 
-    const TILE = 256;
-    const OVERLAP = 16;
+    const TILE = 128;
+    const OVERLAP = 8;
     const STEP = TILE - OVERLAP * 2;
 
     const cols = Math.max(1, Math.ceil((image.width - OVERLAP * 2) / STEP));
