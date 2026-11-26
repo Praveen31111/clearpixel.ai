@@ -295,7 +295,10 @@ export function refineCutoutEdges(
           const gi = gRow + (x - px0);
           const q = Math.max(0, Math.min(1, gfMeanA[gi] * gfGuide[gi] + gfMeanB[gi]));
           const orig = gfAlpha[gi];
-          const blended = q * gfBlend + orig * (1 - gfBlend);
+          const blended =
+            subject === 'portrait'
+              ? Math.max(q * gfBlend + orig * (1 - gfBlend), orig * 0.88)
+              : q * gfBlend + orig * (1 - gfBlend);
           guidedAlpha[idx] = Math.round(blended * 255);
         }
       }
@@ -346,12 +349,12 @@ export function refineCutoutEdges(
           const distBgQuick =
             Math.abs(r0 - localBg.r) + Math.abs(g0 - localBg.g) + Math.abs(b0 - localBg.b);
 
-          // Suppress muddy empty border pixels ONLY when they actually match dark local background
-          if (subject === 'portrait' && isDarkLocalBg && a < 40 && distBgQuick < 36) {
-            a = Math.round(a * 0.35);
+          // Suppress muddy empty border pixels ONLY when they are near-zero AND match local background
+          if (subject === 'portrait' && isDarkLocalBg && a < 18 && distBgQuick < 18) {
+            a = Math.round(a * 0.45);
           }
-          if (isWhiteLocalBg && a < 22 && distBgQuick < 36) {
-            a = Math.max(0, a - 6);
+          if (isWhiteLocalBg && a < 16 && distBgQuick < 24) {
+            a = Math.max(0, a - 5);
           }
           if (a <= 2) continue;
 

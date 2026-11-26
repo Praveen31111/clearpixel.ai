@@ -91,17 +91,22 @@ async function getVitMatte(onProgress?: (p: ProgressPayload) => void) {
   if (vitmattePromise) return vitmattePromise;
 
   vitmattePromise = (async () => {
-    onProgress?.({
-      stage: 'downloading',
-      progress: 84,
-      message: 'Loading Studio Hair Matte…',
-    });
-    const processor = await AutoProcessor.from_pretrained(VITMATTE_MODEL_ID);
-    const model = await AutoModelForImageMatting.from_pretrained(VITMATTE_MODEL_ID, {
-      device: 'wasm',
-      dtype: 'q8',
-    });
-    return { model, processor };
+    try {
+      onProgress?.({
+        stage: 'downloading',
+        progress: 84,
+        message: 'Loading Studio Hair Matte…',
+      });
+      const processor = await AutoProcessor.from_pretrained(VITMATTE_MODEL_ID);
+      const model = await AutoModelForImageMatting.from_pretrained(VITMATTE_MODEL_ID, {
+        device: 'wasm',
+        dtype: 'q8',
+      });
+      return { model, processor };
+    } catch (err) {
+      vitmattePromise = null;
+      throw err;
+    }
   })();
 
   return vitmattePromise;
@@ -198,23 +203,64 @@ async function refinePortraitWithVitMatte(
     message: 'Refining fine hair strands…',
   });
 
-  // Cap ViTMatte input to <= 768px (divisible by 32) so mobile & laptop stay fast and within RAM limits
-  const maxDim = 768;
-  const scale = Math.min(1, maxDim / Math.max(image.width, image.height));
-  const matW = Math.max(32, Math.round((image.width * scale) / 32) * 32);
-  const matH = Math.max(32, Math.round((image.height * scale) / 32) * 32);
+  // Find foreground bounding box + 32px padding so ViTMatte focuses 100% of its resolution on the subject
+  let minX = image.width;
+  let minY = image.height;
+  let maxX = 0;
+  let maxY = 0;
+  for (let y = 0; y < image.height; y++) {
+    const row = y * image.width;
+    for (let x = 0; x < image.width; x++) {
+      if (coarseMask[row + x] > 16) {
+        if (x < minX) minX = x;
+        if (x > maxX) maxX = x;
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+    }
+  }
 
-  const smallImg = await image.rgb().resize(matW, matH);
-  const smallMaskImg = await new RawImage(coarseMask, image.width, image.height, 1).resize(
-    matW,
-    matH
-  );
+  if (maxX <= minX || maxY <= minY) {
+    return coarseMask;
+  }
+
+  const pad = 32;
+  const cx0 = Math.max(0, minX - pad);
+  const cy0 = Math.max(0, minY - pad);
+  const cx1 = Math.min(image.width, maxX + pad + 1);
+  const cy1 = Math.min(image.height, maxY + pad + 1);
+  const cw = cx1 - cx0;
+  const ch = cy1 - cy0;
+
+  const srcRgba = image.rgba().data as unknown as Uint8ClampedArray;
+  const cropRgba = new Uint8ClampedArray(cw * ch * 4);
+  const cropMask = new Uint8Array(cw * ch);
+  for (let ty = 0; ty < ch; ty++) {
+    const srcIdx = (cy0 + ty) * image.width + cx0;
+    const dstIdx = ty * cw;
+    cropRgba.set(srcRgba.subarray(srcIdx * 4, (srcIdx + cw) * 4), dstIdx * 4);
+    cropMask.set(coarseMask.subarray(srcIdx, srcIdx + cw), dstIdx);
+  }
+
+  const isMobile =
+    typeof navigator !== 'undefined' && /Mobi|Android|iPhone|iPad/i.test(navigator.userAgent);
+  const maxDim = isMobile ? 640 : 1024;
+  const scale = Math.min(1, maxDim / Math.max(cw, ch));
+  const matW = Math.max(32, Math.round((cw * scale) / 32) * 32);
+  const matH = Math.max(32, Math.round((ch * scale) / 32) * 32);
+
+  const cropImg = new RawImage(new Uint8Array(cropRgba.buffer), cw, ch, 4).rgb();
+  const smallImg = await cropImg.resize(matW, matH);
+  const smallMaskImg = await new RawImage(cropMask, cw, ch, 1).resize(matW, matH);
   const smallMask = smallMaskImg.data as unknown as Uint8Array;
-  const trimapBytes = buildAutoTrimap(smallMask, matW, matH, 5, 14);
+  // Wide outward dilation (26px) ensures outer flyaway hair tips fall inside the ViTMatte unknown band
+  const trimapBytes = buildAutoTrimap(smallMask, matW, matH, 3, 26);
   const trimapImg = new RawImage(trimapBytes, matW, matH, 1);
 
   const inputs = await processor(smallImg, trimapImg);
-  const { alphas } = await model(inputs);
+  const out = await model(inputs);
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const alphas = out.alphas ?? (Object.values(out)[0] as any);
   const alphaData = alphas.data as Float32Array;
 
   const matteSmallBytes = new Uint8Array(matW * matH);
@@ -222,24 +268,21 @@ async function refinePortraitWithVitMatte(
     matteSmallBytes[i] = Math.max(0, Math.min(255, Math.round(alphaData[i] * 255)));
   }
 
-  const matteResized = await new RawImage(matteSmallBytes, matW, matH, 1).resize(
-    image.width,
-    image.height
-  );
-  const fullTrimapResized = await trimapImg.resize(image.width, image.height);
-  const matteFull = matteResized.data as unknown as Uint8Array;
-  const trimapFull = fullTrimapResized.data as unknown as Uint8Array;
+  const matteResized = await new RawImage(matteSmallBytes, matW, matH, 1).resize(cw, ch);
+  const cropTrimapResized = await trimapImg.resize(cw, ch);
+  const matteCrop = matteResized.data as unknown as Uint8Array;
+  const trimapCrop = cropTrimapResized.data as unknown as Uint8Array;
 
-  // Merge ViTMatte predictions inside the unknown trimap band while preserving solid core & far bg
-  const merged = new Uint8Array(coarseMask.length);
-  for (let i = 0; i < merged.length; i++) {
-    const t = trimapFull[i];
-    if (t >= 230) {
-      merged[i] = Math.max(coarseMask[i], matteFull[i]);
-    } else if (t <= 25) {
-      merged[i] = Math.min(coarseMask[i], matteFull[i]);
-    } else {
-      merged[i] = matteFull[i];
+  // Merge ViTMatte predictions inside the unknown trimap band while keeping solid core & far bg crisp
+  const merged = new Uint8Array(coarseMask);
+  for (let ty = 0; ty < ch; ty++) {
+    const dstRow = (cy0 + ty) * image.width + cx0;
+    const srcRow = ty * cw;
+    for (let tx = 0; tx < cw; tx++) {
+      const t = trimapCrop[srcRow + tx];
+      if (t > 12 && t < 242) {
+        merged[dstRow + tx] = matteCrop[srcRow + tx];
+      }
     }
   }
   return merged;
